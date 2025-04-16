@@ -285,10 +285,10 @@ def collate_env_batch(batch, n_envs, batch_size):
         f"Expected batch of size {n_envs * batch_size}, got {len(batch)}"
     )
 
-    grouped = [batch[i * batch_size:(i + 1) * batch_size] for i in range(n_envs)]
+    grouped = [batch[i * batch_size:(i + 1) * batch_size] for i in range(n_envs)] #batch, n_envs
     collated = {}
     #Shape as batch_size, n_envs, ...
-    for key in batch[0].keys():
+    for key in batch[0].keys(): #For each key in the batch
         batch_stacked = [torch.stack([b[key] for b in group]) for group in grouped] #batch, envs, ...
         batch_stacked = torch.stack(batch_stacked, dim=1)
         collated[key] = batch_stacked

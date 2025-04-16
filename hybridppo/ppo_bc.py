@@ -29,7 +29,7 @@ from abc import ABC
 SelfPPO = TypeVar("SelfPPO", bound="PPO")
 
 
-class PPOExpert(OnPolicyAlgorithm):
+class PPOBC(OnPolicyAlgorithm):
     """
     Proximal Policy Optimization algorithm (PPO) (clip version)
 
@@ -119,8 +119,7 @@ class PPOExpert(OnPolicyAlgorithm):
             seed: Optional[int] = None,
             device: Union[th.device, str] = "auto",
             _init_setup_model: bool = True,
-            minari_dataset = None,
-            log_prob_expert = 0
+            minari_dataset = None
     ):
         super().__init__(
             policy,
@@ -195,13 +194,10 @@ class PPOExpert(OnPolicyAlgorithm):
             self.minari_transition_dataset,
             batch_sampler=parallel_sequential_sampler,
             collate_fn=partial(collate_env_batch, n_envs=self.num_expert_envs, batch_size=n_steps),
-            num_workers=4,
-            shuffle=False,
+            num_workers=4
         )
         self.minari_transition_iterator = iter(self.minari_transition_dataloader)
         self._expert_last_obs = None  # type: Optional[Union[np.ndarray, dict[str, np.ndarray]]]
-
-        self.log_prob_expert = log_prob_expert
 
 
         #To make it compatible with stable baselines3 API and buffer
@@ -244,6 +240,36 @@ class PPOExpert(OnPolicyAlgorithm):
 
         self.expert_observation_space = deepcopy(self.observation_space)
         self._expert_last_episode_starts = np.ones((self.env.num_envs,), dtype=bool)
+    #
+    # @staticmethod
+    # def expert_collate_fn(batch):
+    #     #Make these np arrays
+    #     return {
+    #             "id": torch.Tensor([x.id for x in batch]),
+    #             "observations": torch.nn.utils.rnn.pad_sequence(
+    #                 [torch.as_tensor(x.observations) for x in batch],
+    #                 batch_first=True
+    #             ),
+    #             "actions": torch.nn.utils.rnn.pad_sequence(
+    #                 [torch.as_tensor(x.actions) for x in batch],
+    #                 batch_first=True
+    #             ),
+    #             "rewards": torch.nn.utils.rnn.pad_sequence(
+    #                 [torch.as_tensor(x.rewards) for x in batch],
+    #                 batch_first=True
+    #             ),
+    #             "terminations": torch.nn.utils.rnn.pad_sequence(
+    #                 [torch.as_tensor(x.terminations) for x in batch],
+    #                 batch_first=True
+    #             ),
+    #             "truncations": torch.nn.utils.rnn.pad_sequence(
+    #                 [torch.as_tensor(x.truncations) for x in batch],
+    #                 batch_first=True
+    #             )
+    #         }
+    #
+    # import torch
+    # from torch.utils.data import Dataset
 
     def _flatten_obs(self, obs, observation_space):
         """
@@ -304,7 +330,8 @@ class PPOExpert(OnPolicyAlgorithm):
 
             # Convert to pytorch tensor or to TensorDict
 
-            self._expert_last_episode_starts = dones #Could be buggy
+
+        self._expert_last_episode_starts = dones
 
         with th.no_grad():
             # Compute value for the last timestep
@@ -320,6 +347,81 @@ class PPOExpert(OnPolicyAlgorithm):
 
 
 
+
+    # def make_offline_rollouts(self, callback, expert_buffer: RolloutBuffer, n_rollout_steps) -> bool:
+    #     # Make a list of offline observations, actions and trees
+    #     if self.verbose > 0:
+    #         print("INFO: Making offline rollouts")
+    #     self.policy.set_training_mode(False)
+    #     n_steps = 0
+    #     expert_buffer.reset()
+    #     # TODO: Do we need callbacks in offline rollouts?
+    #     # callback.update_locals(locals())
+    #     # callback.on_rollout_start()
+    #
+    #     # Sample expert episode
+    #     self._last_episode_starts_expert = np.ones((self.num_expert_envs,), dtype=bool)
+    #     while n_steps < n_rollout_steps:
+    #         batches = []
+    #         for _ in range(self.num_expert_envs):
+    #             # We do thi s because as we are using num_workers = num_expert_envs
+    #             # Each call to next(self.data_iter) will return 1 step from a different trajectory
+    #             # This is what the rollout buffer expects
+    #             try:
+    #                 # Batch expects 1 step from n_envs trajectories
+    #                 batch = next(self.data_iter)
+    #             except StopIteration:
+    #                 # Reinitialize the iterator if we run out of data
+    #                 self.data_iter = iter(self.dataloader)
+    #                 batch = next(self.data_iter)
+    #             batches.append(batch[0])
+    #         batch = self.np_collate_fn(batches, self.num_expert_envs)
+    #
+    #         last_obs = self._flatten_obs(batch['observation'], self.observation_space)
+    #         rewards = batch['reward']
+    #         dones = batch['done']
+    #         actions = batch['action']
+    #
+    #         # Only log online timesteps
+    #         # self.num_timesteps += self.num_expert_envs
+    #         n_steps += 1
+    #
+    #         self._last_obs_expert = last_obs
+    #         with th.no_grad():
+    #             # Convert to pytorch tensor or to TensorDict
+    #             obs_tensor = obs_as_tensor(self._last_obs_expert, self.device)
+    #             actions = obs_as_tensor(actions, self.device)
+    #             episode_starts = th.tensor(self._last_episode_starts_expert, dtype=th.float32, device=self.device)
+    #             actions, values, log_probs = self.policy.forward_expert(obs_tensor, actions)
+    #
+    #         actions = actions.cpu().numpy()
+    #
+    #         expert_buffer.add(
+    #             self._last_obs_expert,
+    #             actions,
+    #             rewards,
+    #             self._last_episode_starts_expert,
+    #             values,
+    #             log_probs,
+    #         )
+    #
+    #         self._last_episode_starts_expert = dones
+    #
+    #     next_obs = self._flatten_obs(batch['next_observation'],
+    #                                  self.observation_space)  # Get the next observation to calculate the values
+    #
+    #     with th.no_grad():
+    #         # Compute value for the last timestep
+    #         episode_starts = th.tensor(dones, dtype=th.float32, device=self.device)
+    #         values = self.policy.predict_values(
+    #             obs_as_tensor(next_obs, self.device))  # pylint: disable=unexpected-keyword-arg
+    #     expert_buffer.compute_returns_and_advantage(last_values=values, dones=dones)
+    #
+    #     if self.verbose > 0:
+    #         print("INFO: Finished making offline rollouts")
+    #     # callback.on_rollout_end()
+    #     # callback.update_locals(locals())
+    #     return True
     def train_ppo_offline(self, clip_range, clip_range_vf) -> None:
         self.policy.set_training_mode(True)
 
@@ -333,16 +435,12 @@ class PPOExpert(OnPolicyAlgorithm):
                        "approx_kl_div": [],
                        "clip_fraction": [], "advantages": [], "log_prob": []}
 
-        logs_offline = {"ratio_current_old": [], "policy_loss": [], "value_loss": [], "entropy_loss": [],
-                        "approx_kl_div": [],
-                        "clip_fraction": [], "clamp_fraction": [], "advantages": [], "max_log_prob": [],
-                        "min_log_prob": [], "log_prob": [], "ratio_old_expert": [], "advantages_min": [],
-                        "advantages_max": []}
+        logs_offline = {"max_log_prob": [], "min_log_prob": [], "log_prob": [], "bc_loss": []}
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
             approx_kl_divs = []
-            offline_data_buffer = self.expert_buffer.get(self.batch_size//2)
-            online_data_buffer = self.rollout_buffer.get(self.batch_size//2)
+            offline_data_buffer = self.expert_buffer.get(self.batch_size)
+            online_data_buffer = self.rollout_buffer.get(self.batch_size)
             # Do a complete pass on the rollout buffer
             while True:
                 try:
@@ -371,86 +469,43 @@ class PPOExpert(OnPolicyAlgorithm):
                 )
 
                 # Evaluate offline actions
-                values_offline, log_prob_offline, entropy_offline, = self.policy.evaluate_actions_expert(
+                values_offline, log_prob_offline, entropy_offline, = self.policy.evaluate_actions(
                     offline_batch.observations,
                     actions_offline,
                 )
 
-                min_log_prob = -10
-                # log_prob_offline = th.clamp(log_prob_offline, min_log_prob)
-                log_prob_expert = self.log_prob_expert
 
-                # Dial to weigh expert data vs online data. If expert data is from a similar policy (Inputs/Outputs) keep it lowg
                 values_online = values_online.flatten()
-                values_offline = values_offline.flatten()
-
-
-                # Normalize advantage
-
-                ratio_old_expert_offline = th.clamp(th.exp(
-                    offline_batch.old_log_prob - log_prob_expert), max = 1.0, min=0.0)
 
                 advantages_online = online_batch.advantages
 
-                advantages_offline = offline_batch.advantages * ratio_old_expert_offline
 
-                # Concatenate advantages
-                advantages = th.cat((advantages_online, advantages_offline), 0)
 
-                # #Clamp advantages
+                #Clamp advantages
                 if self.normalize_advantage:
-                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-                advantages = th.clamp(advantages, -1, 1)
-                advantages_online = advantages[:len(advantages_online)]
-                advantages_offline = advantages[len(advantages_online):]
-
-               # Create a mask for entries with negative advantage and log_probs < -10
-                mask = (log_prob_offline < min_log_prob)
-
-                # Detach the gradient for the masked entries
-                log_prob_offline[mask] = min_log_prob
-                values_offline = th.where(mask, values_offline.detach(), values_offline)
-                # Importance sampling ratios
+                    advantages_online = (advantages_online - advantages_online.mean()) / (advantages_online.std() + 1e-8)
+                # advantages = th.clamp(advantages, -1, 1)
 
                 ratio_current_old_online = th.exp(log_prob_online - online_batch.old_log_prob)
-                ratio_current_old_offline = th.clamp(th.exp(
-                    log_prob_offline - th.clamp(offline_batch.old_log_prob, min_log_prob, 100)), max = 1)
-                ratio_current_expert_offline = th.exp(
-                    log_prob_offline - log_prob_expert)
-
-                # clipped surrogate loss for online
 
                 policy_loss_1_online = advantages_online * ratio_current_old_online
                 policy_loss_2_online = advantages_online * th.clamp(ratio_current_old_online, 1 - clip_range,
                                                                     1 + clip_range)
                 policy_loss_online = -th.mean(th.min(policy_loss_1_online, policy_loss_2_online))
 
-                # clipped surrogate loss for offline
-                policy_loss_1_offline = advantages_offline * ratio_current_old_offline  # Old/expert ratio is already multiplied
-                # old/expert*current/old = current/expert (Expert sampled the data)
-                policy_loss_2_offline = advantages_offline * th.clamp(ratio_current_old_offline, 1 - clip_range,
-                                                                      1 + clip_range)
-                policy_loss_offline = -th.mean(th.min(policy_loss_1_offline, policy_loss_2_offline))
-
                 if self.clip_range_vf is None:
                     # No clipping
                     values_pred_online = values_online
-                    values_pred_offline = values_offline
                 else:
                     # Clip the different between old and new value
                     # NOTE: this depends on the reward scaling
                     values_pred_online = online_batch.old_values + th.clamp(
                         values_online - online_batch.old_values, -clip_range_vf, clip_range_vf
                     )
-                    values_pred_offline = offline_batch.old_values + th.clamp(
-                        values_offline - offline_batch.old_values, -clip_range_vf, clip_range_vf
-                    )
 
                 # Value loss using the TD(gae_lambda) target
                 value_loss_online = th.mean(
                     (((online_batch.returns - values_pred_online) ** 2))) * self.vf_coef
-                value_loss_offline = th.mean(
-                    (((offline_batch.returns - values_pred_offline) ** 2) * ratio_old_expert_offline)) * self.vf_coef
 
                 if entropy_online is None:
                     # Approximate entropy when no analytical form
@@ -458,15 +513,8 @@ class PPOExpert(OnPolicyAlgorithm):
                 else:
                     entropy_loss_online = -th.mean(entropy_online) * self.ent_coef
 
-                if entropy_offline is None:
-                    # Approximate entropy when no analytical form
-                    entropy_loss_offline = -th.mean(-log_prob_offline + 1e-8) * self.ent_coef
-                else:
-                    entropy_loss_offline = -th.mean(entropy_offline) * self.ent_coef
-
                 online_loss = policy_loss_online + entropy_loss_online + value_loss_online + entropy_loss_online
-                offline_loss = policy_loss_offline + value_loss_offline  # TODO: Regularization here for offline actions with -ve advantage
-
+                offline_loss = -log_prob_offline*0.005
                 # Calculate approximate form of reverse KL Divergence for early stopping
                 # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
                 # and discussion in PR #419: https://github.com/DLR-RM/stable-baselines3/pull/419
@@ -476,16 +524,10 @@ class PPOExpert(OnPolicyAlgorithm):
                     log_ratio_online = log_prob_online - online_batch.old_log_prob
                     approx_kl_div_online = th.mean(
                         ((th.exp(log_ratio_online) - 1) - log_ratio_online)).cpu().numpy()
-                    log_ratio_offline = log_prob_offline - th.clamp(offline_batch.old_log_prob, min_log_prob, 100)
-                    approx_kl_div_offline = th.mean(
-                        ((th.exp(log_ratio_offline) - 1) - log_ratio_offline)).cpu().numpy()
 
                     # Adjust learning rate to keep clip at about 0.2 - 0.3
                 clip_fraction_online = th.mean(
                     (th.abs(ratio_current_old_online - 1) > clip_range).float()).item()
-                clip_fraction_offline = th.mean(
-                    (th.abs(ratio_current_old_offline - 1) > clip_range).float()).item()
-                clamp_fraction_offline = th.mean((log_prob_offline <= min_log_prob).float()).item()
 
                 # This is all just a logging
                 # Log online data
@@ -500,35 +542,29 @@ class PPOExpert(OnPolicyAlgorithm):
                 logs_online["advantages"].append(advantages_online.mean().item())
 
                 # Log offline data
-                logs_offline["ratio_current_old"].append(ratio_current_old_offline.mean().item())
-                logs_offline["policy_loss"].append(policy_loss_offline.item())
-                logs_offline["value_loss"].append(value_loss_offline.item())
-                logs_offline["entropy_loss"].append(entropy_loss_offline.item())
-                logs_offline["approx_kl_div"].append(approx_kl_div_offline)
-                logs_offline["clip_fraction"].append(clip_fraction_offline)
-                logs_offline["clamp_fraction"].append(clamp_fraction_offline)
-                logs_offline["advantages"].append(advantages_offline.mean().item())
                 logs_offline["max_log_prob"].append(log_prob_offline.max().item())
                 logs_offline["min_log_prob"].append(log_prob_offline.min().item())
                 logs_offline["log_prob"].append(log_prob_offline.mean().item())
-                logs_offline["ratio_old_expert"].append(ratio_old_expert_offline.mean().item())
-                logs_offline["advantages_min"].append(advantages_offline.min().item())
-                logs_offline["advantages_max"].append(advantages_offline.max().item())
+                logs_offline["bc_loss"].append(offline_loss.mean().item())
+
                 # print(advantages_offline.min().item(), advantages_offline.max().item(), ratio_old_expert_offline.mean().item(),)
                 # Optimization step
                 self.policy.optimizer.zero_grad()
-                loss_offline = offline_loss / 2
-                loss_offline.backward()
-                # # Log std should only be updated for online data
-                self.policy.log_std.grad.zero_()
-                loss_online = online_loss / 2
-                loss_online.backward()
+                # Backpropagation
+                total_loss = online_loss + offline_loss.mean()
+                total_loss.backward()
+
                 # Clip grad norm
                 th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 self.policy.optimizer.step()
 
         self._n_updates += 1
- # Logs
+
+        explained_var_online = explained_variance(self.rollout_buffer.values.flatten(),
+                                                  self.rollout_buffer.returns.flatten())
+        explained_var_offline = explained_variance(self.expert_buffer.values.flatten(),
+                                                   self.expert_buffer.returns.flatten())
+        # Logs
         # Log online data
         explained_var_online = explained_variance(self.rollout_buffer.values.flatten(),
                                                   self.rollout_buffer.returns.flatten())
