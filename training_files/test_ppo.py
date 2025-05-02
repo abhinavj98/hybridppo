@@ -7,7 +7,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import gymnasium as gym
 import minari
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.evaluation import evaluate_policy
 from argparse import ArgumentParser
@@ -60,7 +60,7 @@ if __name__ == "__main__":
         # policy_kwargs = {}  # {"net_arch": {"pi": [64,64], "vf": [64, 64]}, "activation_fn": nn.Tanh}
         policy_kwargs = {"log_std_init": hparam['log_std_init'],
                          "activation_fn": nn.ReLU, "optimizer_kwargs": {"betas": (0.999, 0.999)}}
-        model = PPO(hparam['policy'], env, verbose=1, learning_rate=hparam['learning_rate'], n_steps=hparam['n_steps'],
+        model = PPO(hparam['policy'], env , verbose=1, learning_rate=hparam['learning_rate'], n_steps=hparam['n_steps'],
                           batch_size=hparam['batch_size'], n_epochs=hparam['n_epochs'],
                           gamma=hparam['gamma'], ent_coef=hparam['ent_coef'], clip_range=hparam['clip_range'],
                           normalize_advantage=hparam['normalize'], vf_coef=hparam['vf_coef'],
