@@ -26,6 +26,7 @@ import yaml
 import random
 import string
 import wandb
+from stable_baselines3.common.callbacks import EvalCallback
 def init_wandb(params):
     wandb.init(
         project="HybridPPO",
@@ -79,6 +80,13 @@ if __name__ == "__main__":
 
         init_wandb(wandb_params)
         env = make_vec_env(lambda: gym.make(dataset.env_spec), n_envs=hparam['n_envs'], monitor_dir=None)
+        eval_env = gym.make(dataset.env_spec, render_mode="human")
+        eval_env = Monitor(eval_env, filename=None, allow_early_resets=True)
+        eval_callback = EvalCallback(eval_env, best_model_save_path="./logs/",
+                                     log_path="./logs/", eval_freq=50000,
+                                     deterministic=True, render=False)
+        #Eval callback
+
         log_prob_expert = r#-np.log(r) + env.action_space.shape[0] * 0.699 #-logr -D/2logpi
         # Run PPO
         policy_kwargs = {"log_std_init": hparam['log_std_init'],
@@ -93,7 +101,7 @@ if __name__ == "__main__":
                           minari_dataset = dataset,log_prob_expert=log_prob_expert,
                           )
         print(" Running on device", model.device)
-        model.learn(total_timesteps=hparam['n_timesteps'])
+        model.learn(total_timesteps=hparam['n_timesteps'], callback=eval_callback)
 
         # Evaluate model
         # mean_reward, std_reward = evaluate_policwany(model, eval_env, n_eval_episodes=10)
