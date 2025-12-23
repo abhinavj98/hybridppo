@@ -1,3 +1,7 @@
 *.zip
 .idea
-tb_test
+logs/
+wandb/
+__*
+datasets
+tb*
