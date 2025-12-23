@@ -1,5 +1,7 @@
 import copy
+import math
 import warnings
+from pathlib import Path
 from typing import Any, ClassVar, Optional, TypeVar, Union
 
 import numpy as np
@@ -49,13 +51,7 @@ class ExpertRolloutBufferSamples(NamedTuple):
     returns: th.Tensor
     log_prob_expert: th.Tensor  # New field for expert log probabilities
 
-
-class CustomRolloutBuffer(RolloutBuffer):
-    def __init__(self, *args, **kwargs):
-        super(CustomRolloutBuffer, self).__init__(*args, **kwargs)
-    def compute_returns_and_advantage(self, last_values: th.Tensor, dones: np.ndarray) -> None:
 class ExpertRolloutBuffer(RolloutBuffer):
-
     def __init__(self, *args, **kwargs):
         super(ExpertRolloutBuffer, self).__init__(*args, **kwargs)
 
@@ -96,6 +92,8 @@ class ExpertRolloutBuffer(RolloutBuffer):
         """
 
         last_gae_lam = 0
+        rho_bar = 1.0  # For V-trace
+        c_bar = 0.95  # For V-trace
         for step in reversed(range(self.buffer_size)):
             if step == self.buffer_size - 1:
                 next_non_terminal = 1.0 - dones.astype(np.float32)
@@ -105,12 +103,13 @@ class ExpertRolloutBuffer(RolloutBuffer):
                 next_values = self.values[step + 1]
 
             ratio = np.exp(self.log_probs[step] - self.log_prob_expert[step])  # ratio = p(a|s) / p(a|s, expert)
-            ratio = np.clip(ratio, 1e-3, 1)
+            rho = np.clip(ratio, 1e-3, rho_bar)
+            c = np.clip(ratio, 1e-3, c_bar)
             # next_ratio = np.clip(next_ratio, 1e-5, 1)
-            delta = (self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step])*ratio
+            delta = (self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step])*rho
             # last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
             #For retrace
-            last_gae_lam = delta + self.gamma* next_non_terminal * last_gae_lam*ratio
+            last_gae_lam = delta + self.gamma* next_non_terminal * last_gae_lam*c
             self.advantages[step] = last_gae_lam
         self.returns = self.advantages + self.values
 
@@ -282,7 +281,6 @@ class PPOExpert(OnPolicyAlgorithm):
                 spaces.MultiBinary,
             ),
         )
-        global minari_transition_dataloader, minari_transition_iterator, minari_transition_dataset
         # Sanity check, otherwise it will lead to noisy gradient and NaN
         # because of the advantage normalization
         if normalize_advantage:
@@ -319,20 +317,20 @@ class PPOExpert(OnPolicyAlgorithm):
 
         #Minari dataset supports iteration over episodes which we use in MinariTransitionDataset
         self.minari_dataset = minari_dataset
-        minari_transition_dataset = MinariTransitionDataset(minari_dataset)
+        self.minari_transition_dataset = MinariTransitionDataset(minari_dataset)
         parallel_sequential_sampler = MultiEpisodeSequentialSampler(
-            minari_transition_dataset,
+            self.minari_transition_dataset,
             n_envs=self.num_expert_envs,
             batch_size=n_steps,
         )
-        minari_transition_dataloader = DataLoader(
-            minari_transition_dataset,
+        self.minari_transition_dataloader = DataLoader(
+            self.minari_transition_dataset,
             batch_sampler=parallel_sequential_sampler,
             collate_fn=partial(collate_env_batch, n_envs=self.num_expert_envs, batch_size=n_steps),
             num_workers=4,
             shuffle=False,
         )
-        minari_transition_iterator = iter(minari_transition_dataloader)
+        self.minari_transition_iterator = iter(self.minari_transition_dataloader)
         self._expert_last_obs = None  # type: Optional[Union[np.ndarray, dict[str, np.ndarray]]]
 
         self.log_prob_expert = log_prob_expert
@@ -387,7 +385,6 @@ class PPOExpert(OnPolicyAlgorithm):
         return OrderedDict([(k, np.stack([o[k] for o in obs])) for k in observation_space.spaces.keys()])
 
     def make_offline_rollouts(self, callback, expert_buffer: RolloutBuffer, n_rollout_steps) -> bool:
-        global minari_transition_dataloader, minari_transition_iterator, minari_transition_dataset
         #Read from minari dataset and fill in expert buffer
         #Minari dataset can be used with data loader
         # assert self._expert_last_obs is not None, "No previous expert observation was provided"
@@ -406,50 +403,54 @@ class PPOExpert(OnPolicyAlgorithm):
         # while n_steps < n_rollout_steps:
         try:
             # Batch expects 1 step from n_envs trajectories
-            batch = next(minari_transition_iterator)
+            batch = next(self.minari_transition_iterator)
         except StopIteration:
             # Reinitialize the iterator if we run out of data
-            minari_transition_iterator = iter(minari_transition_dataloader)
-            batch = next(minari_transition_iterator) #Tensor
+            self.minari_transition_iterator = iter(self.minari_transition_dataloader)
+            batch = next(self.minari_transition_iterator) #Tensor
 
 
-        for i in range(batch['observations'].shape[0]): #Loop over num envs
+        for i in range(batch['observations'].shape[0]):  # Loop over timesteps
             last_obs = batch['observations'][i]
             rewards = batch['rewards'][i]
             dones = batch['dones'][i]
             actions = batch['actions'][i]
             next_obs = batch['next_observations'][i]
 
+            # Ensure 1D shapes for per-env scalars to avoid broadcast issues
+            rewards_np = rewards.squeeze(-1).cpu().numpy()
+            dones_np = dones.squeeze(-1).cpu().numpy()
+
+            # Keep episode start tracking per environment
+            if not hasattr(self, "_expert_last_episode_starts"):
+                self._expert_last_episode_starts = np.ones((self.env.num_envs,), dtype=bool)
+
             with th.no_grad():
-                # Convert to pytorch tensor or to TensorDict
-                obs_tensor = last_obs#obs_as_tensor(last_obs, self.device)
-                # actions = obs_as_tensor(actions, self.device)
-                # episode_starts = th.tensor(self._last_episode_starts_expert, dtype=th.float32, device=self.device)
-                _, values, log_probs = self.policy.forward_expert(obs_tensor, actions)
-                _, _, expert_log_probs = self.expert_policy.forward_expert(obs_tensor, actions)
-
-            # actions = actions.cpu().numpy()
-
+                obs_tensor = last_obs.to(self.device)
+                act_tensor = actions.to(self.device)
+                _, values, log_probs = self.policy.forward_expert(obs_tensor, act_tensor)
+                _, _, expert_log_probs = self.expert_policy.forward_expert(obs_tensor, act_tensor)
 
             expert_buffer.add(
                 last_obs.cpu().numpy(),
-                actions.cpu().numpy(),
-                rewards.cpu().numpy(),
+                act_tensor.cpu().numpy(),
+                rewards_np,
                 self._expert_last_episode_starts,
-                values,
+                values.squeeze(-1),
                 log_probs,
-                expert_log_probs
+                expert_log_probs,
             )
 
-            # Convert to pytorch tensor or to TensorDict
-
-            self._expert_last_episode_starts = dones
+            self._expert_last_episode_starts = dones_np
 
         with th.no_grad():
             # Compute value for the last timestep
-            values = self.policy.predict_values(next_obs.to(self.device)) # pylint: disable=unexpected-keyword-arg
+            values = self.policy.predict_values(next_obs.to(self.device)).squeeze(-1)  # pylint: disable=unexpected-keyword-arg
 
-        expert_buffer.compute_returns_and_advantage(last_values=values.cpu().numpy(), dones=dones.cpu().numpy())
+        expert_buffer.compute_returns_and_advantage(
+            last_values=values.cpu().numpy(),
+            dones=dones_np,
+        )
         if self.verbose > 0:
             print("INFO: Finished making offline rollouts")
         # callback.on_rollout_end()
@@ -487,16 +488,12 @@ class PPOExpert(OnPolicyAlgorithm):
         # Mahalanobis distance threshold (square root of chi2). Distance from Gaussian distribution follows chi2 distribution
         mahalanobis_threshold = np.sqrt(chi2_value)
         # train for n_epochs epochs
-        warm_start = True
         for epoch in range(self.n_epochs):
             print("Epoch ", epoch, "of ", self.n_epochs)
             approx_kl_divs = []
             offline_data_buffer = self.expert_buffer.get(self.batch_size//2)
             online_data_buffer = self.rollout_buffer.get(self.batch_size//2)
             # Do a complete pass on the rollout buffer
-            if self.num_timesteps > 200_000 and warm_start:
-                warm_start = False
-                self.expert_policy = copy.deepcopy(self.policy)  # Copy the policy to avoid modifying the original
             while True:
                 try:
                     # Get offline batch from buffer
@@ -565,8 +562,8 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 ratio_old_expert_offline = th.clamp(th.exp(
                     offline_batch.old_log_prob - log_prob_expert), max = 1.0, min=1e-3)
-                ratio_old_expert_offline_uc = th.clamp(th.exp(
-                    offline_batch.old_log_prob - log_prob_expert), max=1.0)
+                # ratio_old_expert_offline_uc = th.clamp(th.exp(
+                #     offline_batch.old_log_prob - log_prob_expert), max=1.0)
 
                 advantages_online = online_batch.advantages
 
@@ -574,7 +571,7 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 # Concatenate advantages
                 advantages = th.cat((advantages_online, advantages_offline), 0)
-                advantages = th.clamp(advantages, min=-5., max=5.)
+                advantages = th.clamp(advantages, min=-10., max=10.)
 
                 # #Clamp advantages
                 if self.normalize_advantage:
@@ -584,8 +581,8 @@ class PPOExpert(OnPolicyAlgorithm):
                 advantages_online = advantages[:len(advantages_online)]
                 advantages_offline = advantages[len(advantages_online):]
                 # Scale advantages for rare events - Gradient at most will be A*k
-                max_grad = 0.1 #Max norm is 0.5
-                min_sigma = 0.2
+                # max_grad = 0.1 #Max norm is 0.5
+                # min_sigma = 0.2
                 advantages_offline = th.where(mahalanobis_distance > mahalanobis_threshold, advantages_offline*mahalanobis_threshold/
                         mahalanobis_distance, advantages_offline)
 
@@ -593,20 +590,10 @@ class PPOExpert(OnPolicyAlgorithm):
                 #Clamp advantages
                 # advantages_offline = th.clamp(advantages_offline, min=-1., max=1.)
                 # advantages_online = th.clamp(advantages_online, min=-1., max=1.)
-                bc_log_prob = log_prob_offline.clone()
-
-                min_log_prob = -1*self.env.action_space.shape[0]
-
-                log_prob_mask = (log_prob_offline < min_log_prob) & (advantages_offline < 0)
-                mask = log_prob_mask
-                log_prob_offline = th.where(mask, log_prob_offline.detach(), log_prob_offline)
-                old_log_prob_offline = th.where(mask, min_log_prob, old_log_prob_offline)
-
-
                 log_ratio_current_old_offline = log_prob_offline - old_log_prob_offline
                 # Max value before exp overflows in float64
                 # max_exp_input = 709.0  for float64
-                log_ratio_current_old_offline = th.clamp(log_ratio_current_old_offline, min=-10, max=10)
+                # log_ratio_current_old_offline = th.clamp(log_ratio_current_old_offline, min=-10, max=10)
 
                 ratio_current_old_online = th.exp(log_prob_online - online_batch.old_log_prob)
                 ratio_current_old_offline = th.exp(
@@ -623,12 +610,12 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 # clipped surrogate loss for offline
                 #normalizs the ratio_current_old_offline
-                policy_loss_1_offline = th.clamp(advantages_offline, min = -10, max = 10) * ratio_current_old_offline
+                policy_loss_1_offline = th.clamp(advantages_offline, min = -10, max = 10) * ratio_current_old_offline * ratio_current_expert_offline
                 # Old/expert ratio is already multiplied
                 # old/expert*current/old = current/expert (Expert sampled the data)
                 policy_loss_2_offline = th.clamp(advantages_offline, min = -10, max = 10) * \
                                         th.clamp(ratio_current_old_offline, 1 - clip_range,
-                                                                      1 + clip_range)
+                                                                      1 + clip_range)*ratio_current_expert_offline
                 policy_loss_offline = -th.mean(th.min(policy_loss_1_offline, policy_loss_2_offline))
 
                 if self.clip_range_vf is None:
@@ -646,19 +633,17 @@ class PPOExpert(OnPolicyAlgorithm):
                     )
 
                 # New
-                clamped_returns_offline = th.clamp(offline_batch.returns, min=-100, max=100)
-                clamped_returns_online = th.clamp(online_batch.returns, min=-100, max=100)
+                clamped_returns_offline = th.clamp(offline_batch.returns, min=-100, max=1000)
+                clamped_returns_online = th.clamp(online_batch.returns, min=-100, max=1000)
                 # Value loss using the TD(gae_lambda) target
                 value_loss_online = th.mean(
                     (((clamped_returns_online - values_pred_online) ** 2))) * self.vf_coef
 
                 #Only increase value, do not decrease it. As in the future when support loses the values goes to 0
 
-                value_diff = (clamped_returns_offline - values_pred_offline)
-                if not warm_start:
-                    value_diff = th.clamp(value_diff, min=0.)
-                value_loss_offline = th.mean(
-                    ((value_diff ** 2))) * self.vf_coef
+                # value_diff = (clamped_returns_offline - values_pred_offline)
+                # value_loss_offline = th.mean(
+                #     ((value_diff ** 2))) * self.vf_coef
 
                 if entropy_online is None:
                     # Approximate entropy when no analytical form
@@ -672,12 +657,8 @@ class PPOExpert(OnPolicyAlgorithm):
                 else:
                     entropy_loss_offline = -th.mean(entropy_offline) * self.ent_coef
 
-                if warm_start:
-                    online_loss = 0
-                    offline_loss = -th.mean(bc_log_prob)*0.001 + value_loss_offline*0.01
-                else:
-                    online_loss = policy_loss_online + entropy_loss_online + value_loss_online
-                    offline_loss = policy_loss_offline + value_loss_offline
+                online_loss = policy_loss_online + entropy_loss_online + value_loss_online
+                offline_loss = policy_loss_offline
 
                 # Calculate approximate form of reverse KL Divergence for early stopping
                 # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
@@ -726,7 +707,7 @@ class PPOExpert(OnPolicyAlgorithm):
                 logs_offline["ratio_current_old_max"].append(ratio_current_old_offline.max().item())
                 logs_offline["ratio_current_old_min"].append(ratio_current_old_offline.min().item())
                 logs_offline["policy_loss"].append(policy_loss_offline.item())
-                logs_offline["value_loss"].append(value_loss_offline.item())
+                # logs_offline["value_loss"].append(value_loss_offline.item())
                 logs_offline["entropy_loss"].append(entropy_loss_offline.item())
                 logs_offline["approx_kl_div"].append(approx_kl_div_offline)
                 logs_offline["clip_fraction"].append(clip_fraction_offline)
@@ -748,9 +729,8 @@ class PPOExpert(OnPolicyAlgorithm):
                 loss_offline.backward()
                 # # Log std should only be updated for online data
                 self.policy.log_std.grad.zero_()
-                if not warm_start:
-                    loss_online = online_loss / 2
-                    loss_online.backward()
+                loss_online = online_loss / 2
+                loss_online.backward()
                 # Clip grad norm
                 th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 self.policy.optimizer.step()
@@ -794,6 +774,154 @@ class PPOExpert(OnPolicyAlgorithm):
                            explained_variance(buffer.values.flatten(), buffer.returns.flatten()))
 
 
+    def train_bc(
+        self,
+        total_epochs: int,
+        bc_batch_size: Optional[int] = None,
+        bc_save_path: Optional[str] = None,
+        log_interval: int = 100,
+        bc_coeff: float = 1.0,
+        warm_start_steps: int = 0,
+        val_dataloader: Optional[DataLoader] = None,
+        val_batches_per_epoch: Optional[int] = None,
+        save_every_epochs: int = 5,
+    ) -> None:
+        """Train the policy on the offline dataset via behavioral cloning."""
+
+        if self.minari_transition_dataset is None or self.minari_transition_dataloader is None:
+            raise ValueError("BC training requires a Minari dataset and dataloader.")
+
+        batch_size = bc_batch_size or self.batch_size
+        transitions_per_batch = max(1, batch_size * self.num_expert_envs)
+        total_transitions = len(self.minari_transition_dataset)
+        print(f"Total transitions in Minari dataset: {total_transitions}")
+        print(f"Total batches per epoch: {math.ceil(total_transitions / transitions_per_batch)}")
+        batches_per_epoch = max(1, math.ceil(total_transitions / transitions_per_batch))
+
+        if val_dataloader is not None:
+            val_batches_per_epoch = val_batches_per_epoch or batches_per_epoch
+
+        iterator = self.minari_transition_iterator
+        if iterator is None:
+            iterator = iter(self.minari_transition_dataloader)
+        self.minari_transition_iterator = iterator
+
+        self.policy.set_training_mode(True)
+        bc_losses: list[float] = []
+        steps = 0
+        for epoch in range(total_epochs):
+            iterator = iter(self.minari_transition_dataloader)
+            self.minari_transition_iterator = iterator
+            for batch_idx in range(batches_per_epoch):
+                try:
+                    batch = next(iterator)
+                except StopIteration:
+                    break
+
+                obs = batch["observations"].to(self.device)
+                actions = batch["actions"].to(self.device)
+                obs = obs.reshape(-1, *obs.shape[2:])
+                actions = actions.reshape(-1, *actions.shape[2:])
+
+                if isinstance(self.action_space, spaces.Discrete) or isinstance(self.action_space, spaces.MultiDiscrete):
+                    actions = actions.long()
+
+                _, log_prob, _ = self.policy.evaluate_actions(obs, actions)
+                bc_loss = -bc_coeff * th.mean(log_prob)
+
+                self.policy.optimizer.zero_grad()
+                bc_loss.backward()
+                th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                self.policy.optimizer.step()
+
+                bc_losses.append(bc_loss.item())
+                steps += 1
+
+                if getattr(self, "_logger", None) is not None:
+                    self.logger.record("train_bc/loss", bc_loss.item())
+                if log_interval > 0 and steps % log_interval == 0:
+                    avg_loss = sum(bc_losses[-log_interval:]) / min(len(bc_losses), log_interval)
+                    # print(f"BC epoch {epoch + 1} batch {batch_idx + 1} loss {avg_loss:.6f}")
+
+            # Validation loop
+            if val_dataloader is not None:
+                val_iterator = iter(val_dataloader)
+                val_losses: list[float] = []
+                for _ in range(val_batches_per_epoch or 1):
+                    try:
+                        val_batch = next(val_iterator)
+                    except StopIteration:
+                        break
+
+                    obs_v = val_batch["observations"].to(self.device)
+                    acts_v = val_batch["actions"].to(self.device)
+                    obs_v = obs_v.reshape(-1, *obs_v.shape[2:])
+                    acts_v = acts_v.reshape(-1, *acts_v.shape[2:])
+                    if isinstance(self.action_space, spaces.Discrete) or isinstance(self.action_space, spaces.MultiDiscrete):
+                        acts_v = acts_v.long()
+
+                    with th.no_grad():
+                        _, log_prob_v, _ = self.policy.evaluate_actions(obs_v, acts_v)
+                        val_losses.append((-th.mean(log_prob_v) * bc_coeff).item())
+
+                if val_losses:
+                    val_mean = sum(val_losses) / len(val_losses)
+                    print(f"Epoch {epoch+1}: val_bc_loss={val_mean:.6f}")
+                    if getattr(self, "_logger", None) is not None:
+                        self.logger.record("val_bc/loss", val_mean)
+
+            if bc_save_path is not None and save_every_epochs > 0 and (epoch + 1) % save_every_epochs == 0:
+                # Optional value-only finetune on fresh rollouts before saving
+                if warm_start_steps > 0:
+                    self._value_finetune_rollouts(num_episodes=100)
+                save_path = Path(bc_save_path+f"_epoch{epoch+1} with avg loss {avg_loss:.4f}")
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                self.policy.save(save_path.as_posix())
+                print(f"Saved BC policy to {save_path}.zip")
+
+    def _value_finetune_rollouts(self, num_episodes: int = 100) -> None:
+        """Collect on-policy rollouts and update only the value function head."""
+
+        if self.env is None:
+            return
+
+        self.policy.set_training_mode(True)
+        episodes_done = 0
+        while episodes_done < num_episodes:
+            obs = self.env.reset()
+            done = False
+            traj_obs = []
+            traj_rewards = []
+
+            while not done:
+                obs_tensor = obs_as_tensor(obs, self.device)
+                with th.no_grad():
+                    action, _ = self.policy.predict(obs, deterministic=True)
+                obs, reward, done, _ = self.env.step(action)
+                traj_obs.append(obs_tensor)
+                traj_rewards.append(reward)
+
+            # Compute discounted returns for the trajectory
+            returns = []
+            g = 0.0
+            for r in reversed(traj_rewards):
+                g = float(r) + self.gamma * g
+                returns.insert(0, g)
+
+            obs_batch = th.cat([o if o.ndim > 1 else o.unsqueeze(0) for o in traj_obs]).to(self.device)
+            returns_batch = th.tensor(returns, dtype=th.float32, device=self.device)
+
+            values = self.policy.predict_values(obs_batch).squeeze(-1)
+            value_loss = F.mse_loss(values, returns_batch) * self.vf_coef
+            # print(f"Value finetune episode {episodes_done+1}/{num_episodes}, loss: {value_loss.item():.6f}")
+
+            self.policy.optimizer.zero_grad()
+            value_loss.backward()
+            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            self.policy.optimizer.step()
+
+            episodes_done += 1
+
     def train(self) -> None:
         """
         Update policy using the currently gathered rollout buffer.
@@ -810,6 +938,24 @@ class PPOExpert(OnPolicyAlgorithm):
         else:
             clip_range_vf = None
         self.train_ppo_offline(clip_range, clip_range_vf)
+
+    def _excluded_save_params(self) -> list[str]:
+        """
+        Returns the names of the parameters that should be excluded from being
+        saved by pickling. Extends parent's list to exclude unhashable objects
+        like DataLoaders and iterators which are recreated on load.
+
+        :return: List of parameters that should be excluded from being saved with pickle.
+        """
+        excluded_params = super()._excluded_save_params()
+        # Add minari-specific objects that are unhashable and should be excluded
+        excluded_params.extend([
+            "minari_transition_dataloader",
+            "minari_transition_iterator", 
+            "minari_transition_dataset",
+        ])
+        return excluded_params
+
     def learn(
             self: SelfPPO,
             total_timesteps: int,

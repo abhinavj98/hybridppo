@@ -10,6 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import gymnasium as gym
 import minari
+from copy import deepcopy
 from hybridppo.ppo_expert import PPOExpert
 from hybridppo.policies import MlpPolicyExpert
 from stable_baselines3.common.monitor import Monitor
@@ -48,6 +49,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_runs", type=int, default=1)
     parser.add_argument('--names', nargs='+', help='List of names', required=True)
     parser.add_argument('--r', type=float, default=0.001, help='Ratio for log_prob_expert')
+    parser.add_argument('--bc_policy', type=str, default=None, help='Path to a pretrained BC checkpoint to initialize the policy')
 
     args = parser.parse_args()
     dataset_name = f"{args.dataset}/{args.env}/{args.names}"
@@ -57,10 +59,12 @@ if __name__ == "__main__":
         hparam_all = yaml.safe_load(f)
     hparam = hparam_all[args.hparam]
     dataset = get_dataset(args.dataset, args.env, args.names)
+    if dataset is None:
+        raise ValueError("Dataset not found")
     print(dataset.env_spec)
     print(hparam)
 
-
+ 
 
     # env = get_environment(dataset)
     # # Wrap the environment with DummyVecEnv
@@ -77,6 +81,8 @@ if __name__ == "__main__":
                         'r': r,
                         }
         wandb_params.update(hparam)
+        if args.bc_policy:
+            wandb_params['bc_policy'] = args.bc_policy
 
         init_wandb(wandb_params)
         env = make_vec_env(lambda: gym.make(dataset.env_spec), n_envs=hparam['n_envs'], monitor_dir=None)
@@ -101,6 +107,13 @@ if __name__ == "__main__":
                           minari_dataset = dataset,log_prob_expert=log_prob_expert,
                           )
         print(" Running on device", model.device)
+        if args.bc_policy:
+            if not os.path.isfile(args.bc_policy):
+                raise FileNotFoundError(f"Specified BC policy not found: {args.bc_policy}")
+            bc_policy = MlpPolicyExpert.load(args.bc_policy, device=model.device)
+            model.policy.load_state_dict(bc_policy.state_dict())
+            model.expert_policy = deepcopy(model.policy)
+            print(f"Loaded BC policy weights from {args.bc_policy}")
         model.learn(total_timesteps=hparam['n_timesteps'], callback=eval_callback)
 
         # Evaluate model

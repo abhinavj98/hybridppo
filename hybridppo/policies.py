@@ -69,7 +69,7 @@ class MlpPolicyExpert(ActorCriticPolicy):
                 net_arch: Union[List[int], Dict[str, List[int]]],
                 activation_fn: Type[nn.Module],
                 device: Union[th.device, str] = "auto",
-                add_layer_norm: bool = True,  # New argument to control Layer Norm
+                add_layer_norm: bool = False,  # New argument to control Layer Norm
         ) -> None:
             super().__init__()
             device = get_device(device)

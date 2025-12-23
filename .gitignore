@@ -5,3 +5,8 @@ wandb/
 __*
 datasets
 tb*
+.DS_Store
+BUG_REPORT.md
+CODEBASE_SUMMARY.md
+bc_checkpoints/
+mujoco/

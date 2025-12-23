@@ -1,9 +1,9 @@
 Walker2d-v4:
   normalize: true
-  n_envs: 1
+  n_envs: 8
   policy: 'MlpPolicy'
-  n_timesteps: !!float 1e6
-  batch_size: 32
+  n_timesteps: !!float 25e6
+  batch_size: 64
   n_steps: 512
   gamma: 0.99
   learning_rate: 5.05041e-05
@@ -13,24 +13,26 @@ Walker2d-v4:
   gae_lambda: 0.95
   max_grad_norm: 1
   vf_coef: 0.871923
+  log_std_init: 0
+
 
 
 Walker2d-v4-hybrid:
   normalize: true
-  n_envs: 1
+  n_envs: 8
   policy: 'MlpPolicy'
-  n_timesteps: !!float 2e6
-  batch_size: 32
+  n_timesteps: !!float 25e6
+  batch_size: 64
   n_steps: 512
   gamma: 0.99
-  learning_rate: 5.05041e-05
-  ent_coef: 0.0001
+  learning_rate: 5.05041e-06
+  ent_coef: 0.000585045
   clip_range: 0.1
   n_epochs: 20
-  log_std_init: 0
   gae_lambda: 0.95
   max_grad_norm: 1
   vf_coef: 0.871923
+  log_std_init: 0
 
 InvertedDoublePendulum-v2:
   normalize: true
@@ -51,10 +53,10 @@ InvertedDoublePendulum-v2:
 
 default:
   normalize: false
-  n_envs: 1
+  n_envs: 16
   policy: 'MlpPolicy'
-  n_timesteps: !!float 25e6
-  batch_size: 32
+  n_timesteps: !!float 1e6
+  batch_size: 128
   n_steps: 2048
   log_std_init: 0
   vf_coef: 0.5
@@ -65,3 +67,20 @@ default:
   n_epochs: 10
   gae_lambda: 0.95
   max_grad_norm: 0.5
+
+Walker2d-v4-bc-large:
+  normalize: true
+  n_envs: 8
+  policy: 'MlpPolicy'
+  n_timesteps: !!float 25e6
+  batch_size: 256
+  n_steps: 512
+  gamma: 0.99
+  learning_rate: 1.0e-04
+  ent_coef: 0.000585045
+  clip_range: 0.1
+  n_epochs: 20
+  gae_lambda: 0.95
+  max_grad_norm: 1
+  vf_coef: 0.871923
+  log_std_init: 0

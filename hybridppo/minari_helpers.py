@@ -5,21 +5,42 @@ from hybridppo import DATASET_PATH
 from torch.utils.data import IterableDataset, get_worker_info
 from minari.dataset.episode_data import EpisodeData
 
-def get_dataset(dataset: str, env: str, names: str) -> minari.MinariDataset:
-    #names is a list of names
-    #Create new name containing all names
+def get_dataset(dataset: str, env: str, names) -> minari.MinariDataset:
+    # names can be a single string or an iterable of strings
+    if isinstance(names, str):
+        names = [names]
     temp_name = "_".join(names)
     print(temp_name)
-    name = f"{DATASET_PATH}/{dataset}/{env}/{temp_name}"
-    try:
-        dataset = minari.load_dataset(name)
-        return dataset
-    except FileNotFoundError:
-        pass
+    name = f"{DATASET_PATH}/{env}/{temp_name}"
+    # try:
+    #     dataset = minari.load_dataset(name)
+    #     return dataset
+    # except FileNotFoundError:
+    #     pass
+    
+    # Try to load individual datasets from local path first
     datasets = []
     for i in names:
-        datasets.append(minari.load_dataset(f"{DATASET_PATH}/{dataset}/{env}/{i}"))
-    return minari.combine_datasets(datasets, name)
+        local_path = f"{DATASET_PATH}/{dataset}/{env}/{i}"
+        try:
+            datasets.append(minari.load_dataset(local_path))
+        except FileNotFoundError:
+            # If not found locally, try downloading
+            url = f"{dataset}/{env}/{i}"
+            downloaded = minari.download_dataset(url, force_download=True)
+            #Save to local path
+            print(f"Downloading dataset from {url} to {local_path}")
+            new_dataset = minari.load_dataset(downloaded)
+            print(f"downloaded dataset has {len(new_dataset)} episodes")
+            datasets.append(new_dataset)
+
+    print(f"Loaded {len(datasets)} datasets for names {names}")
+    
+    if len(datasets) == 1:
+        return datasets[0]
+    final_dataset = minari.combine_datasets(datasets, name)
+    print(f"Combined dataset has {len(final_dataset)} episodes")
+    return final_dataset
 
 def get_environment(minari_dataset: minari.MinariDataset, **kwargs) -> gym.Env:
     return minari_dataset.recover_environment(**kwargs)
