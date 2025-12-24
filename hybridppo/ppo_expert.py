@@ -36,6 +36,7 @@ from functools import partial
 from scipy.stats import chi2
 from typing import Generator
 from typing import NamedTuple, Optional, Union, Any, Callable, Dict, List, Type
+from tqdm.auto import tqdm
 
 from abc import ABC
 #Instead of scaling advantage, scale returns using SimbaV2
@@ -478,7 +479,7 @@ class PPOExpert(OnPolicyAlgorithm):
                         "clip_fraction": [], "clamp_fraction": [], "advantages": [], "max_log_prob": [],
                         "min_log_prob": [], "log_prob": [], "ratio_old_expert": [], "advantages_min": [],
                         "advantages_max": [], "ratio_old_expert_max": [], "ratio_old_expert_min": [],
-                        "ratio_current_old_max": [], "ratio_current_old_min": [], "mahalanobis_distance": []}
+                        "ratio_current_old_max": [], "ratio_current_old_min": [], "mahalanobis_distance": [], "log_prob_expert": []}
 
         confidence_level = 0.8
 
@@ -571,7 +572,7 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 # Concatenate advantages
                 advantages = th.cat((advantages_online, advantages_offline), 0)
-                advantages = th.clamp(advantages, min=-10., max=10.)
+     
 
                 # #Clamp advantages
                 if self.normalize_advantage:
@@ -583,8 +584,13 @@ class PPOExpert(OnPolicyAlgorithm):
                 # Scale advantages for rare events - Gradient at most will be A*k
                 # max_grad = 0.1 #Max norm is 0.5
                 # min_sigma = 0.2
-                advantages_offline = th.where(mahalanobis_distance > mahalanobis_threshold, advantages_offline*mahalanobis_threshold/
-                        mahalanobis_distance, advantages_offline)
+                # Sample weight: down-weight far/OOD offline samples
+                weight_offline = th.where(
+                    mahalanobis_distance > mahalanobis_threshold,
+                    mahalanobis_threshold / (mahalanobis_distance + 1e-8),
+                    th.ones_like(mahalanobis_distance),
+                )
+                weight_offline = th.clamp(weight_offline, 0.0, 1.0)
 
 
                 #Clamp advantages
@@ -594,12 +600,22 @@ class PPOExpert(OnPolicyAlgorithm):
                 # Max value before exp overflows in float64
                 # max_exp_input = 709.0  for float64
                 # log_ratio_current_old_offline = th.clamp(log_ratio_current_old_offline, min=-10, max=10)
+                log_ratio_current_old_offline = log_prob_offline - old_log_prob_offline
+                log_ratio_current_old_offline = th.clamp(log_ratio_current_old_offline, -20.0, 20.0)
+                log_ratio_current_expert_offline = log_prob_offline - log_prob_expert
+                log_ratio_current_expert_offline = th.clamp(log_ratio_current_expert_offline, -20.0, 20.0)
+                ratio_current_old_offline = th.exp(log_ratio_current_old_offline)
+                ratio_current_old_offline = th.clamp(ratio_current_old_offline, 0.2, 5.0)
+                ratio_current_expert_offline = th.exp(log_ratio_current_expert_offline)
+                ratio_current_expert_offline = th.clamp(ratio_current_expert_offline, 1e-3, 2.0)
 
                 ratio_current_old_online = th.exp(log_prob_online - online_batch.old_log_prob)
-                ratio_current_old_offline = th.exp(
-                    log_ratio_current_old_offline)
-                ratio_current_expert_offline = th.exp(
-                    log_prob_offline - log_prob_expert)
+                # ratio_current_old_offline = th.exp(
+                #     log_ratio_current_old_offline)
+                # ratio_current_old_offline = th.clamp(ratio_current_old_offline, 0.2, 5.0)
+                # ratio_current_expert_offline = th.exp(
+                #     log_prob_offline - log_prob_expert)
+                # ratio_current_expert_offline = th.clamp(ratio_current_expert_offline, max=1.0, min=1e-3)
 
                 # clipped surrogate loss for online
 
@@ -610,13 +626,12 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 # clipped surrogate loss for offline
                 #normalizs the ratio_current_old_offline
-                policy_loss_1_offline = th.clamp(advantages_offline, min = -10, max = 10) * ratio_current_old_offline * ratio_current_expert_offline
+                policy_loss_1_offline = advantages_offline * ratio_current_old_offline * ratio_current_expert_offline
                 # Old/expert ratio is already multiplied
                 # old/expert*current/old = current/expert (Expert sampled the data)
-                policy_loss_2_offline = th.clamp(advantages_offline, min = -10, max = 10) * \
-                                        th.clamp(ratio_current_old_offline, 1 - clip_range,
-                                                                      1 + clip_range)*ratio_current_expert_offline
-                policy_loss_offline = -th.mean(th.min(policy_loss_1_offline, policy_loss_2_offline))
+                policy_loss_2_offline = advantages_offline * th.clamp(ratio_current_old_offline, 1 - clip_range,
+                                                                     1 + clip_range)* ratio_current_expert_offline
+                policy_loss_offline = -th.mean(th.min(policy_loss_1_offline, policy_loss_2_offline)* weight_offline)
 
                 if self.clip_range_vf is None:
                     # No clipping
@@ -633,8 +648,8 @@ class PPOExpert(OnPolicyAlgorithm):
                     )
 
                 # New
-                clamped_returns_offline = th.clamp(offline_batch.returns, min=-100, max=1000)
-                clamped_returns_online = th.clamp(online_batch.returns, min=-100, max=1000)
+                clamped_returns_offline = offline_batch.returns#th.clamp(offline_batch.returns, min=-100, max=1000)
+                clamped_returns_online = online_batch.returns#th.clamp(online_batch.returns, min=-100, max=1000)
                 # Value loss using the TD(gae_lambda) target
                 value_loss_online = th.mean(
                     (((clamped_returns_online - values_pred_online) ** 2))) * self.vf_coef
@@ -706,6 +721,7 @@ class PPOExpert(OnPolicyAlgorithm):
                 logs_offline["ratio_current_old"].append(ratio_current_old_offline.mean().item())
                 logs_offline["ratio_current_old_max"].append(ratio_current_old_offline.max().item())
                 logs_offline["ratio_current_old_min"].append(ratio_current_old_offline.min().item())
+                logs_offline["log_prob_expert"].append(log_prob_expert.mean().item())
                 logs_offline["policy_loss"].append(policy_loss_offline.item())
                 # logs_offline["value_loss"].append(value_loss_offline.item())
                 logs_offline["entropy_loss"].append(entropy_loss_offline.item())
@@ -812,6 +828,7 @@ class PPOExpert(OnPolicyAlgorithm):
         for epoch in range(total_epochs):
             iterator = iter(self.minari_transition_dataloader)
             self.minari_transition_iterator = iterator
+            pbar = tqdm(total=batches_per_epoch, desc=f"BC epoch {epoch + 1}/{total_epochs}", leave=False)
             for batch_idx in range(batches_per_epoch):
                 try:
                     batch = next(iterator)
@@ -843,6 +860,12 @@ class PPOExpert(OnPolicyAlgorithm):
                     avg_loss = sum(bc_losses[-log_interval:]) / min(len(bc_losses), log_interval)
                     # print(f"BC epoch {epoch + 1} batch {batch_idx + 1} loss {avg_loss:.6f}")
 
+                # Lightweight progress indicator
+                pbar.update(1)
+                pbar.set_postfix(loss=bc_loss.item())
+
+            pbar.close()
+
             # Validation loop
             if val_dataloader is not None:
                 val_iterator = iter(val_dataloader)
@@ -870,7 +893,14 @@ class PPOExpert(OnPolicyAlgorithm):
                     if getattr(self, "_logger", None) is not None:
                         self.logger.record("val_bc/loss", val_mean)
 
-            if bc_save_path is not None and save_every_epochs > 0 and (epoch + 1) % save_every_epochs == 0:
+            # Save only after 50% of epochs have completed
+            min_save_epoch = 0#max(1, math.ceil(total_epochs * 0.5))
+            if (
+                bc_save_path is not None
+                and save_every_epochs > 0
+                and (epoch + 1) >= min_save_epoch
+                and (epoch + 1) % save_every_epochs == 0
+            ):
                 # Optional value-only finetune on fresh rollouts before saving
                 if warm_start_steps > 0:
                     self._value_finetune_rollouts(num_episodes=100)
@@ -889,15 +919,23 @@ class PPOExpert(OnPolicyAlgorithm):
         episodes_done = 0
         while episodes_done < num_episodes:
             obs = self.env.reset()
+            # Ensure float32 for MPS compatibility
+            if isinstance(obs, np.ndarray):
+                obs = obs.astype(np.float32)
             done = False
             traj_obs = []
             traj_rewards = []
 
             while not done:
-                obs_tensor = obs_as_tensor(obs, self.device)
+                # Convert to float32 for MPS compatibility
+                obs_tensor = th.as_tensor(np.array(obs, dtype=np.float32), device=self.device)
                 with th.no_grad():
-                    action, _ = self.policy.predict(obs, deterministic=True)
+                    # Pass obs as numpy array with float32 dtype
+                    obs_for_predict = obs if isinstance(obs, np.ndarray) else np.array(obs, dtype=np.float32)
+                    action, _ = self.policy.predict(obs_for_predict, deterministic=True)
                 obs, reward, done, _ = self.env.step(action)
+                if isinstance(obs, np.ndarray):
+                    obs = obs.astype(np.float32)
                 traj_obs.append(obs_tensor)
                 traj_rewards.append(reward)
 

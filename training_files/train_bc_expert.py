@@ -72,6 +72,8 @@ if __name__ == "__main__":
     parser.add_argument("--save_name", type=str, default=None)
     parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--val_fraction", type=float, default=0.1, help="Fraction of episodes for validation")
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"],
+                        help="Torch device for BC training")
     args = parser.parse_args()
 
     with open("hparam.yml", "r") as f:
@@ -83,6 +85,17 @@ if __name__ == "__main__":
     dataset = get_dataset(args.dataset, args.env, args.names)
     if dataset is None:
         raise ValueError("Dataset not found")
+
+    if args.device == "auto":
+        if torch.backends.mps.is_available():
+            device = "mps"
+        elif torch.cuda.is_available():
+            device = "cuda"
+        else:
+            device = "cpu"
+    else:
+        device = args.device
+    print(f"Using device: {device}")
 
     policy_kwargs = {
         "log_std_init": hparam.get("log_std_init", 0),
@@ -143,7 +156,7 @@ if __name__ == "__main__":
         max_grad_norm=hparam.get("max_grad_norm", 0.5),
         policy_kwargs=policy_kwargs,
         tensorboard_log=None,
-        device="cpu",
+        device=device,
         minari_dataset=dataset,
         log_prob_expert=0,
     )

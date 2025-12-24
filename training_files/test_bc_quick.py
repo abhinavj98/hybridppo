@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 from functools import partial
+from argparse import ArgumentParser
 import gymnasium as gym
 import torch.nn as nn
 
@@ -66,6 +67,24 @@ def build_loader(dataset, n_envs=1, batch_size=2):
 
 
 def main():
+    parser = ArgumentParser()
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"],
+                        help="Compute device for the smoke test")
+    parser.add_argument("--bc_batch_size", type=int, default=1024, help="BC batch size for the smoke test")
+    args = parser.parse_args()
+
+    if args.device == "auto":
+        if torch.backends.mps.is_available():
+            device = "mps"
+        elif torch.cuda.is_available():
+            device = "cuda"
+        else:
+            device = "cpu"
+    else:
+        device = args.device
+
+    print(f"Using device: {device}")
+
     # Load actual Minari dataset
     dataset = get_dataset("mujoco", "walker2d", ["expert-v0"])
     if dataset is None:
@@ -74,7 +93,7 @@ def main():
     env = gym.make(dataset.env_spec)
     
     # Use just first 3 episodes for quick test (2 train, 1 val)
-    num_episodes = min(3, len(dataset))
+    num_episodes = 20
     train_ids = list(range(num_episodes - 1))  # [0, 1]
     val_ids = [num_episodes - 1]  # [2]
     
@@ -82,7 +101,7 @@ def main():
     val_ds = SubsetTransitionDataset(dataset, val_ids)
     
     n_envs = 1
-    n_steps = 32
+    n_steps = max(64, args.bc_batch_size)*100  # large batch for throughput
     train_loader = build_loader(train_ds, n_envs=n_envs, batch_size=n_steps)
     val_loader = build_loader(val_ds, n_envs=n_envs, batch_size=n_steps)
     
@@ -96,11 +115,11 @@ def main():
         env,
         learning_rate=3e-4,
         n_steps=n_steps,
-        batch_size=32,
+        batch_size=args.bc_batch_size,
         n_epochs=1,
         gamma=0.99,
         policy_kwargs=policy_kwargs,
-        device="cpu",
+        device=device,
         minari_dataset=dataset,
         log_prob_expert=0,
     )
@@ -111,15 +130,15 @@ def main():
 
     print(f"Running BC on {len(train_ds)} train transitions, {len(val_ds)} val transitions")
     model.train_bc(
-        total_epochs=5,
-        bc_batch_size=32,
+        total_epochs=2,
+        bc_batch_size=args.bc_batch_size,
         bc_save_path="test",
-        log_interval=1,
+        log_interval=10,
         bc_coeff=1.0,
-        warm_start_steps=1,
+        warm_start_steps=0,
         val_dataloader=val_loader,
         val_batches_per_epoch=1,
-        save_every_epochs=1,
+        save_every_epochs=0,
     )
     env.close()
     print("BC smoke test completed successfully!")
