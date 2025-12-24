@@ -50,6 +50,10 @@ if __name__ == "__main__":
     parser.add_argument('--names', nargs='+', help='List of names', required=True)
     parser.add_argument('--r', type=float, default=0.001, help='Ratio for log_prob_expert')
     parser.add_argument('--bc_policy', type=str, default=None, help='Path to a pretrained BC checkpoint to initialize the policy')
+    parser.add_argument('--mix_ratio', type=float, default=0.5, help='Offline/online minibatch split ratio (0..1)')
+    parser.add_argument('--rho_bar', type=float, default=1.0, help='V-trace rho_bar cap')
+    parser.add_argument('--c_bar', type=float, default=0.95, help='V-trace c_bar cap')
+    parser.add_argument('--log_std_subtract', type=float, default=0.0, help='Subtract this constant from log_std after each update')
 
     args = parser.parse_args()
     dataset_name = f"{args.dataset}/{args.env}/{args.names}"
@@ -81,6 +85,10 @@ if __name__ == "__main__":
                         'r': r,
                         }
         wandb_params.update(hparam)
+        wandb_params['mix_ratio'] = float(max(0.0, min(1.0, args.mix_ratio)))
+        wandb_params['rho_bar'] = args.rho_bar
+        wandb_params['c_bar'] = args.c_bar
+        wandb_params['log_std_subtract'] = max(0.0, args.log_std_subtract)
         if args.bc_policy:
             wandb_params['bc_policy'] = args.bc_policy
 
@@ -103,8 +111,10 @@ if __name__ == "__main__":
                           gamma=hparam['gamma'], ent_coef=hparam['ent_coef'], clip_range=hparam['clip_range'],
                           normalize_advantage=hparam['normalize'], vf_coef=hparam['vf_coef'],
                           gae_lambda=hparam['gae_lambda'], max_grad_norm=hparam['max_grad_norm'],
-                          policy_kwargs = policy_kwargs, tensorboard_log = './tb_test/hybrid/'+dataset_name+'/'+args.save_file+str(i), device = 'cpu',
-                          minari_dataset = dataset,log_prob_expert=log_prob_expert,
+                  policy_kwargs = policy_kwargs, tensorboard_log = './tb_test/hybrid/'+dataset_name+'/'+args.save_file+str(i), device = 'cpu',
+                  minari_dataset = dataset,log_prob_expert=log_prob_expert,
+                  mix_ratio=wandb_params['mix_ratio'], rho_bar=wandb_params['rho_bar'], c_bar=wandb_params['c_bar'],
+                  log_std_subtract=wandb_params['log_std_subtract'],
                           )
         print(" Running on device", model.device)
         if args.bc_policy:

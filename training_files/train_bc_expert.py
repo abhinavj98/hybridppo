@@ -74,6 +74,8 @@ if __name__ == "__main__":
     parser.add_argument("--val_fraction", type=float, default=0.1, help="Fraction of episodes for validation")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"],
                         help="Torch device for BC training")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
     args = parser.parse_args()
 
     with open("hparam.yml", "r") as f:
@@ -96,6 +98,12 @@ if __name__ == "__main__":
     else:
         device = args.device
     print(f"Using device: {device}")
+
+    # Reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if device == "cuda":
+        torch.cuda.manual_seed_all(args.seed)
 
     policy_kwargs = {
         "log_std_init": hparam.get("log_std_init", 0),
@@ -128,14 +136,14 @@ if __name__ == "__main__":
         train_ds,
         batch_sampler=train_sampler,
         collate_fn=partial(collate_env_batch, n_envs=n_envs, batch_size=n_steps),
-        num_workers=4,
+        num_workers=args.num_workers,
         shuffle=False,
     )
     val_loader = DataLoader(
         val_ds,
         batch_sampler=val_sampler,
         collate_fn=partial(collate_env_batch, n_envs=n_envs, batch_size=n_steps),
-        num_workers=4,
+        num_workers=args.num_workers,
         shuffle=False,
     )
 
@@ -172,9 +180,11 @@ if __name__ == "__main__":
     bc_save_path = save_root / save_name
 
     print(f"Training BC policy for dataset {args.names} -> saving to {bc_save_path}.zip")
+    # Metrics file alongside checkpoints
+    metrics_path = (bc_save_path.parent / f"{bc_save_path.name}_metrics.csv").as_posix()
     model.train_bc(
         total_epochs=args.bc_epochs,
-        bc_batch_size=args.bc_batch_size,
+        bc_batch_size=transitions_per_batch,  # use resolved per-update batch size
         bc_save_path=str(bc_save_path),
         log_interval=args.log_interval,
         bc_coeff=args.bc_coeff,
@@ -182,6 +192,7 @@ if __name__ == "__main__":
         val_dataloader=val_loader,
         val_batches_per_epoch=val_batches_per_epoch,
         save_every_epochs=args.save_every_epochs,
+        metrics_path=metrics_path,
     )
 
     env.close()

@@ -14,6 +14,10 @@ Walker2d-v4:
   max_grad_norm: 1
   vf_coef: 0.871923
   log_std_init: 0
+  mix_ratio: 0.5
+  rho_bar: 1.0
+  c_bar: 0.95
+  log_std_subtract: 0.0
 
 
 
@@ -33,6 +37,10 @@ Walker2d-v4-hybrid:
   max_grad_norm: 1
   vf_coef: 0.871923
   log_std_init: 0
+  mix_ratio: 0.5
+  rho_bar: 1.0
+  c_bar: 0.95
+  log_std_subtract: 0.0
 
 InvertedDoublePendulum-v2:
   normalize: true
@@ -67,6 +75,10 @@ default:
   n_epochs: 10
   gae_lambda: 0.95
   max_grad_norm: 0.5
+  mix_ratio: 0.5
+  rho_bar: 1.0
+  c_bar: 0.95
+  log_std_subtract: 0.0
 
 Walker2d-v4-bc-large:
   normalize: true
