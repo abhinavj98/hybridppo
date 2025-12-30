@@ -19,7 +19,22 @@ Walker2d-v4:
   c_bar: 0.95
   log_std_subtract: 0.0
 
-
+Walker2d-v4-bc-large:
+  normalize: true
+  n_envs: 8
+  policy: 'MlpPolicy'
+  n_timesteps: !!float 25e6
+  batch_size: 256
+  n_steps: 512
+  gamma: 0.99
+  learning_rate: 1.0e-04
+  ent_coef: 0.000585045
+  clip_range: 0.1
+  n_epochs: 20
+  gae_lambda: 0.95
+  max_grad_norm: 1
+  vf_coef: 0.871923
+  log_std_init: 0
 
 Walker2d-v4-hybrid:
   normalize: true
@@ -60,27 +75,27 @@ InvertedDoublePendulum-v2:
   log_std_init: 0
 
 default:
-  normalize: false
-  n_envs: 16
+  normalize: true
+  n_envs: 8
   policy: 'MlpPolicy'
-  n_timesteps: !!float 1e6
-  batch_size: 128
-  n_steps: 2048
-  log_std_init: 0
-  vf_coef: 0.5
+  n_timesteps: !!float 25e6
+  batch_size: 64
+  n_steps: 512
   gamma: 0.99
-  learning_rate: 3.0e-04
-  ent_coef: 0.0001
-  clip_range: 0.2
-  n_epochs: 10
+  learning_rate: 5.05041e-05
+  ent_coef: 0.000585045
+  clip_range: 0.1
+  n_epochs: 20
   gae_lambda: 0.95
-  max_grad_norm: 0.5
+  max_grad_norm: 1
+  vf_coef: 0.871923
+  log_std_init: 0
   mix_ratio: 0.5
   rho_bar: 1.0
   c_bar: 0.95
   log_std_subtract: 0.0
 
-Walker2d-v4-bc-large:
+default_bc:
   normalize: true
   n_envs: 8
   policy: 'MlpPolicy'

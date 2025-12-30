@@ -951,10 +951,13 @@ class PPOExpert(OnPolicyAlgorithm):
                 # Optional value-only finetune on fresh rollouts before saving
                 if warm_start_steps > 0:
                     self._value_finetune_rollouts(num_episodes=100)
-                save_path = Path(bc_save_path+f"_epoch{epoch+1} with avg loss {train_mean:.4f}")
+                # Use a clean epoch-based suffix; avoid embedding loss in filename
+                save_path = Path(bc_save_path + f"_epoch{epoch+1}")
                 save_path.parent.mkdir(parents=True, exist_ok=True)
-                self.policy.save(save_path.as_posix())
-                print(f"Saved BC policy to {save_path}.zip")
+                # Ensure checkpoint filename has .zip extension (required by downstream tools)
+                save_zip = save_path.with_suffix(".zip")
+                self.policy.save(save_zip.as_posix())
+                print(f"Saved BC policy to {save_zip}")
 
     def _value_finetune_rollouts(self, num_episodes: int = 100) -> None:
         """Collect on-policy rollouts and update only the value function head."""

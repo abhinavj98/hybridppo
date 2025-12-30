@@ -31,7 +31,6 @@ def init_wandb(params):
 
 
 
-
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--dataset", type=str, default="D4RL")
@@ -42,7 +41,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_runs", type=int, default=1)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
+    # parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--tb_dir", type=str, default="./tb_test/online", help="TensorBoard log root")
     parser.add_argument("--eval_episodes", type=int, default=10)
     args = parser.parse_args()
@@ -79,8 +78,7 @@ if __name__ == "__main__":
                     }
     wandb_params.update(hparam)
 
-    if args.wandb:
-        init_wandb(wandb_params)
+    init_wandb(wandb_params)
 
     for i in range(args.num_runs):
         env = make_vec_env(lambda: gym.make(dataset.env_spec),

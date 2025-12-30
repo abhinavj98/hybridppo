@@ -4,6 +4,10 @@ import gymnasium as gym
 from hybridppo import DATASET_PATH
 from torch.utils.data import IterableDataset, get_worker_info
 from minari.dataset.episode_data import EpisodeData
+from torch.utils.data import Sampler
+import random
+from torch.utils.data import Sampler
+import random
 
 def get_dataset(dataset: str, env: str, names) -> minari.MinariDataset:
     # names can be a single string or an iterable of strings
@@ -30,7 +34,7 @@ def get_dataset(dataset: str, env: str, names) -> minari.MinariDataset:
             downloaded = minari.download_dataset(url, force_download=True)
             #Save to local path
             print(f"Downloading dataset from {url} to {local_path}")
-            new_dataset = minari.load_dataset(downloaded)
+            new_dataset = minari.load_dataset(url)
             print(f"downloaded dataset has {len(new_dataset)} episodes")
             datasets.append(new_dataset)
 
@@ -48,175 +52,6 @@ def get_environment(minari_dataset: minari.MinariDataset, **kwargs) -> gym.Env:
 def get_eval_environment(minari_dataset: minari.MinariDataset, **kwargs) -> gym.Env:
     return minari_dataset.recover_environment(eval_env=True, **kwargs)
 
-
-# class MinariTransitionDataset(Dataset):
-#     def __init__(self, minari_dataset):
-#         """
-#         Stream transitions (obs, action, reward, next_obs, done) from MinariDataset
-#         without loading everything into memory.
-#         MinariDataset is a Dataset object that returns episodes. We instead return
-#         transitions (obs, action, reward, next_obs, done).
-#         """
-#         self.minari_dataset = minari_dataset # Minari dataset is a Dataset object that return episodes
-#         self.index = []
-#
-#         # # Build (episode_idx, step_idx) index
-#         # for episode_idx, episode in enumerate(minari_dataset):
-#         #     print(episode, episode)
-#         #     num_steps = len(episode)
-#         #     for step_idx in range(num_steps):
-#         #         self.index.append((episode_idx, step_idx))
-#
-#         #List comprehension with zip to make self.index
-#         self.index = [(episode_idx, step_idx) for episode_idx, episode in enumerate(minari_dataset) for
-#                       step_idx in range(len(episode))]
-#
-#     def __len__(self):
-#         return len(self.index)
-#
-#     def __getitem__(self, idx):
-#         #Data iterator will take care of the indexing and batching
-#         episode_idx, step_idx = self.index[idx]
-#         episode = self.minari_dataset[episode_idx]
-#
-#         obs = torch.as_tensor(episode.observations[step_idx], dtype=torch.float32)
-#         next_obs = torch.as_tensor(episode.observations[step_idx + 1], dtype=torch.float32)
-#         action = torch.as_tensor(episode.actions[step_idx], dtype=torch.float32)
-#         reward = torch.as_tensor(episode.rewards[step_idx], dtype=torch.float32)
-#         done = torch.as_tensor(
-#             episode.terminations[step_idx] or episode.truncations[step_idx],
-#             dtype=torch.bool
-#         )
-#
-#         return {
-#             "observations": obs,
-#             "actions": action,
-#             "rewards": reward,
-#             "next_observations": next_obs,
-#             "dones": done
-#         }
-
-import random
-import torch
-from torch.utils.data import IterableDataset
-
-# class MinariTransitionDataset(IterableDataset):
-#     def __init__(self, minari_dataset, num_envs: int):
-#         """
-#         An IterableDataset that returns batches of transitions.
-#         Each row in the batch comes from a separate episode and maintains temporal order.
-#         When an episode ends, it is resampled from the dataset.
-#         """
-#         self.dataset = minari_dataset
-#         self.num_envs = num_envs
-#
-#     def __iter__(self):
-#         # For each slot, initialize an active episode and current step
-#         episode_idxs = [random.randint(0, len(self.dataset) - 1) for _ in range(self.num_envs)]
-#         episodes = [self.dataset[i] for i in episode_idxs]
-#         step_idxs = [0] * self.num_envs
-#
-#         while True:
-#             batch = {
-#                 "observations": [],
-#                 "actions": [],
-#                 "rewards": [],
-#                 "next_observations": [],
-#                 "dones": []
-#             }
-#
-#             for i in range(self.num_envs):
-#                 episode = episodes[i]
-#                 t = step_idxs[i]
-#
-#                 if t >= len(episode.actions):
-#                     # Resample a new episode if the previous one is done
-#                     new_ep_idx = random.randint(0, len(self.dataset) - 1)
-#                     episode = self.dataset[new_ep_idx]
-#                     episodes[i] = episode
-#                     step_idxs[i] = 0
-#                     t = 0
-#
-#                 obs = torch.tensor(episode.observations[t], dtype=torch.float32)
-#                 next_obs = torch.tensor(episode.observations[t + 1], dtype=torch.float32)
-#                 act = torch.tensor(episode.actions[t], dtype=torch.float32)
-#                 rew = torch.tensor(episode.rewards[t], dtype=torch.float32)
-#                 done = torch.tensor(
-#                     episode.terminations[t] or episode.truncations[t],
-#                     dtype=torch.bool
-#                 )
-#
-#                 batch["observations"].append(obs)
-#                 batch["actions"].append(act)
-#                 batch["rewards"].append(rew)
-#                 batch["next_observations"].append(next_obs)
-#                 batch["dones"].append(done)
-#
-#                 step_idxs[i] += 1
-#
-#             yield {k: torch.stack(v) for k, v in batch.items()}
-
-# class MinariTransitionDataset(IterableDataset):
-#     """An IterableDataset that returns batches of transitions.
-#     Always use with num_workers == num_online_envs.
-#     As we need to simulate each trajectory being returned step by step,
-#     by a separate worker, we need to make sure that each worker
-#     is assigned a different episode.
-#     Each worker gets passed a copy of the dataset and samples a different episode.
-#     We then use worker_id to organize our data in the collate fn."""
-#
-#     def __init__(self, minari_dataset):
-#         self.episode_dataset = minari_dataset
-#         self.num_episodes = len(minari_dataset)
-#
-#     def __iter__(self):
-#         worker_info = get_worker_info()
-#         worker_id = worker_info.id if worker_info else 0
-#         rng = random.Random(worker_id)  # Make worker-specific RNG
-#
-#         # Sample one episode for this worker
-#         episode_idx = rng.randint(0, self.num_episodes - 1)
-#         episode = self.episode_dataset[episode_idx]
-#         step = 0
-#
-#         while True:
-#             if step >= len(episode.actions):
-#                 # Resample new episode
-#                 episode_idx = rng.randint(0, self.num_episodes - 1)
-#                 episode = self.episode_dataset[episode_idx]
-#                 step = 0
-#
-#             yield {
-#                 "worker_id": worker_id,
-#                 "episode_id": episode_idx,
-#                 "step_id": step,
-#                 "observation": torch.tensor(episode.observations[step], dtype=torch.float32),
-#                 "action": torch.tensor(episode.actions[step], dtype=torch.float32),
-#                 "reward": torch.tensor(episode.rewards[step], dtype=torch.float32),
-#                 "next_observation": torch.tensor(episode.observations[step + 1], dtype=torch.float32),
-#                 "done": torch.tensor(
-#                     episode.terminations[step] or episode.truncations[step],
-#                     dtype=torch.bool
-#                 )
-#             }
-#             step += 1
-#
-# def collate_fn(batch):
-#     return batch
-#     # # Sort rows by worker_id to preserve env ordering
-#     # # print(batch)
-#     # batch.sort(key=lambda x: x["worker_id"])
-#     #
-#     # return {
-#     #     "worker_ids": torch.tensor([x["worker_id"] for x in batch]),
-#     #     "episode_ids": torch.tensor([x["episode_id"] for x in batch]),
-#     #     "step_ids": torch.tensor([x["step_id"] for x in batch]),
-#     #     "observations": torch.stack([x["observation"] for x in batch]),
-#     #     "actions": torch.stack([x["action"] for x in batch]),
-#     #     "rewards": torch.stack([x["reward"] for x in batch]),
-#     #     "next_observations": torch.stack([x["next_observation"] for x in batch]),
-#     #     "dones": torch.stack([x["done"] for x in batch]),
-#     # }
 
 
 from torch.utils.data import Dataset
@@ -259,12 +94,6 @@ class MinariTransitionDataset(Dataset):
 
     def __len__(self):
         return len(self.index_map)
-
-
-from torch.utils.data import Sampler
-import random
-from torch.utils.data import Sampler
-import random
 
 class MultiEpisodeSequentialSampler(Sampler):
     """The purpose of this sample is to yield indexes of transitions

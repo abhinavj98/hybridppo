@@ -54,10 +54,15 @@ if __name__ == "__main__":
     parser.add_argument('--rho_bar', type=float, default=1.0, help='V-trace rho_bar cap')
     parser.add_argument('--c_bar', type=float, default=0.95, help='V-trace c_bar cap')
     parser.add_argument('--log_std_subtract', type=float, default=0.0, help='Subtract this constant from log_std after each update')
+    parser.add_argument("--seed", type=int, default=42)
 
+    
     args = parser.parse_args()
     dataset_name = f"{args.dataset}/{args.env}/{args.names}"
     # path = "C:/Users/abhin/OneDrive/Desktop/hybrid-ppo/"
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+
 
     with open("hparam.yml", "r") as f:
         hparam_all = yaml.safe_load(f)

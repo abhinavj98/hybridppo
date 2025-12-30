@@ -174,7 +174,7 @@ if __name__ == "__main__":
     model.minari_transition_dataloader = train_loader
     model.minari_transition_iterator = iter(train_loader)
 
-    save_root = Path(args.save_dir) / args.dataset / args.env
+    save_root = Path(args.save_dir) / args.dataset / args.env / ''.join(args.names)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_name = args.save_name or f"bc_{args.env}_{timestamp}"
     bc_save_path = save_root / save_name
