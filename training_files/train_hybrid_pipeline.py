@@ -25,6 +25,21 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import yaml
 import pandas as pd
+import torch
+
+
+def validate_checkpoint(path: Path) -> bool:
+    """
+    Check if a checkpoint file can be loaded by torch.
+    """
+    try:
+        # Just try to load the header/structure
+        torch.load(path, map_location="cpu")
+        return True
+    except Exception as e:
+        print(f"Checkpoint validation failed for {path.name}: {e}")
+        return False
+
 
 
 
@@ -80,7 +95,8 @@ def find_best_bc_checkpoint(dataset: str, env: str, names: list) -> Optional[Tup
                 
                 # Find corresponding .zip checkpoint
                 # Pattern: bc_*.zip files; look for epoch{N} in name or order by mtime
-                zip_files = sorted(bc_dir.glob("*.zip"))
+                # Exclude value_tuned files to avoid recursion/duplication
+                zip_files = sorted([p for p in bc_dir.glob("*.zip") if "value_tuned" not in p.name])
                 print(f"Found {len(zip_files)} .zip files for checkpoint matching")
                 if zip_files:
 
@@ -123,12 +139,13 @@ def run_bc_training(args, hparam_bc_key: str) -> Optional[Path]:
         "--bc_epochs", str(args.num_bc_epochs),
         "--bc_batch_size", str(args.bc_batch_size),
         "--bc_coeff", str(args.bc_coeff),
-        "--warm_start_steps", str(args.warm_start_steps),
+
+        # "--warm_start_steps", str(args.warm_start_steps),
         "--save_dir", "bc_checkpoints",
         "--log_interval", str(args.log_interval),
         "--save_every_epochs", str(args.save_every_epochs),
         "--seed", str(args.seed),
-        "--device", args.device,
+        "--device", args.device_bc,
     ]
     
     try:
@@ -136,7 +153,7 @@ def run_bc_training(args, hparam_bc_key: str) -> Optional[Path]:
         print(f"BC training completed successfully")
         
         # Find best checkpoint from newly trained run
-        best = find_best_bc_checkpoint(args.dataset, args.env)
+        best = find_best_bc_checkpoint(args.dataset, args.env, args.names)
         if best:
             return best[0]
         else:
@@ -145,6 +162,61 @@ def run_bc_training(args, hparam_bc_key: str) -> Optional[Path]:
     
     except subprocess.CalledProcessError as e:
         print(f"BC training failed with exit code {e.returncode}")
+        return None
+
+
+def run_value_finetuning(args, bc_checkpoint: Path, hparam_hybrid_key: str) -> Optional[Path]:
+    """
+    Run train_value_only.py to finetune value function.
+    Returns path to value-tuned checkpoint if successful.
+    """
+    print(f"\n{'='*60}")
+    print(f"STAGE 1.5: Finetuning Value Function")
+    print(f"{'='*60}")
+    print(f"Input checkpoint: {bc_checkpoint.name}")
+    
+    # Construct expected output path
+    # train_value_only.py saves as {model_path}_value_tuned.zip
+    # But wait, train_value_only.py replaces .zip with _value_tuned.zip
+    # So if input is "model.zip", output is "model_value_tuned.zip"
+    
+    output_path = bc_checkpoint.parent / (bc_checkpoint.stem + "_value_tuned.zip")
+    
+    if output_path.exists():
+        print(f"Found existing value-tuned checkpoint: {output_path.name}")
+        return output_path
+        # if validate_checkpoint(output_path):
+        #     return output_path
+        # else:
+        #     print(f"Existing checkpoint is invalid. Deleting and retraining...")
+        #     output_path.unlink()
+
+    cmd = [
+        "python",
+        "training_files/train_value_only.py",
+        "--dataset", args.dataset,
+        "--minari_env", args.env,
+        "--names", *args.names,
+        "--model_path", str(bc_checkpoint),
+        "--hparam", hparam_hybrid_key, # Pass Hybrid hparam to ensure correct policy init
+        "--timesteps", str(args.warm_start_steps), # Use warm_start_steps for value tuning timesteps
+        "--seed", str(args.seed),
+        "--device", args.device_ppo,
+        "--n_envs", "8", # Default to 8 envs for faster rollout
+        "--learning_rate", "3e-4", # Use standard LR for value finetuning
+    ]
+    
+    try:
+        result = subprocess.run(cmd, check=True, cwd=Path(__file__).parent.parent)
+        print(f"Value finetuning completed successfully")
+        if output_path.exists():
+            return output_path
+        else:
+            print(f"ERROR: Value finetuning completed but output file not found: {output_path}")
+            return None
+    
+    except subprocess.CalledProcessError as e:
+        print(f"Value finetuning failed with exit code {e.returncode}")
         return None
 
 
@@ -182,6 +254,7 @@ def run_hybrid_ppo_training(
         "--c_bar", str(args.c_bar),
         "--log_std_subtract", str(args.log_std_subtract),
         "--seed", str(args.seed),
+        "--device", args.device_ppo,
     ]
     
     try:
@@ -280,8 +353,8 @@ def main():
                         help="BC batch size")
     parser.add_argument("--bc_coeff", type=float, default=0.005,
                         help="BC loss coefficient")
-    parser.add_argument("--warm_start_steps", type=int, default=100,
-                        help="Value finetune steps in BC training")
+    parser.add_argument("--warm_start_steps", type=int, default=500_000,
+                        help="Value finetune timesteps (default: 100000)")
     parser.add_argument("--log_interval", type=int, default=10,
                         help="BC logging interval")
     parser.add_argument("--save_every_epochs", type=int, default=5,
@@ -298,9 +371,12 @@ def main():
                         help="Subtract from log_std after each update")
     
     # Device
-    parser.add_argument("--device", type=str, default="auto",
+    parser.add_argument("--device_bc", type=str, default="auto",
                         choices=["auto", "cpu", "cuda", "mps"],
-                        help="Device for training")
+                        help="Device for BC training")
+    parser.add_argument("--device_ppo", type=str, default="auto",
+                        choices=["auto", "cpu", "cuda", "mps"],
+                        help="Device for PPO training (and value finetuning)")
     
     args = parser.parse_args()
     
@@ -355,11 +431,17 @@ def main():
         print(f"\nPipeline failed: No BC checkpoint available")
         return 1
     
+    # Finetune value function
+    value_tuned_checkpoint = run_value_finetuning(args, bc_checkpoint, hparam_keys["hybrid"])
+    if not value_tuned_checkpoint:
+        print(f"\nPipeline failed: Value finetuning failed")
+        return 1
+
     # Train hybrid PPO
     hybrid_save_file = run_hybrid_ppo_training(
         args,
         hparam_keys["hybrid"],
-        bc_checkpoint,
+        value_tuned_checkpoint, # Use value-tuned checkpoint
         bc_val_loss
     )
     

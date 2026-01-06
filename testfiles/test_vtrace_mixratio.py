@@ -63,6 +63,7 @@ def test_vtrace_caps_reduce_advantages():
 
 def compute_split(batch_size: int, mix_ratio: float):
     mix_ratio = max(0.0, min(1.0, mix_ratio))
+    print(f"Computing split for batch_size={batch_size}, mix_ratio={mix_ratio}")
     offline_bs = max(1, int(batch_size * mix_ratio))
     online_bs = max(1, batch_size - offline_bs)
     return offline_bs, online_bs

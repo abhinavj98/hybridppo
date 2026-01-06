@@ -16,7 +16,7 @@ Walker2d-v4:
   log_std_init: 0
   mix_ratio: 0.5
   rho_bar: 1.0
-  c_bar: 0.95
+  c_bar: 0.9
   log_std_subtract: 0.0
 
 Walker2d-v4-bc-large:
@@ -78,11 +78,11 @@ default:
   normalize: true
   n_envs: 8
   policy: 'MlpPolicy'
-  n_timesteps: !!float 25e6
+  n_timesteps: !!float 25e7
   batch_size: 64
   n_steps: 512
   gamma: 0.99
-  learning_rate: 5.05041e-05
+  learning_rate: 1.0e-05
   ent_coef: 0.000585045
   clip_range: 0.1
   n_epochs: 20
@@ -93,7 +93,7 @@ default:
   mix_ratio: 0.5
   rho_bar: 1.0
   c_bar: 0.95
-  log_std_subtract: 0.0
+  log_std_subtract: 0.01
 
 default_bc:
   normalize: true

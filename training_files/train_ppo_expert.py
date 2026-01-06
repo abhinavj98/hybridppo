@@ -55,6 +55,7 @@ if __name__ == "__main__":
     parser.add_argument('--c_bar', type=float, default=0.95, help='V-trace c_bar cap')
     parser.add_argument('--log_std_subtract', type=float, default=0.0, help='Subtract this constant from log_std after each update')
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default="auto")
 
     
     args = parser.parse_args()
@@ -116,7 +117,7 @@ if __name__ == "__main__":
                           gamma=hparam['gamma'], ent_coef=hparam['ent_coef'], clip_range=hparam['clip_range'],
                           normalize_advantage=hparam['normalize'], vf_coef=hparam['vf_coef'],
                           gae_lambda=hparam['gae_lambda'], max_grad_norm=hparam['max_grad_norm'],
-                  policy_kwargs = policy_kwargs, tensorboard_log = './tb_test/hybrid/'+dataset_name+'/'+args.save_file+str(i), device = 'cpu',
+                  policy_kwargs = policy_kwargs, tensorboard_log = './tb_test/hybrid/'+dataset_name+'/'+args.save_file+str(i), device = args.device,
                   minari_dataset = dataset,log_prob_expert=log_prob_expert,
                   mix_ratio=wandb_params['mix_ratio'], rho_bar=wandb_params['rho_bar'], c_bar=wandb_params['c_bar'],
                   log_std_subtract=wandb_params['log_std_subtract'],
@@ -128,6 +129,9 @@ if __name__ == "__main__":
             bc_policy = MlpPolicyExpert.load(args.bc_policy, device=model.device)
             model.policy.load_state_dict(bc_policy.state_dict())
             model.expert_policy = deepcopy(model.policy)
+            #Set expert policy log std as constant
+            model.policy.log_std.data.fill_(-1)
+            model.expert_policy.log_std.data.fill_(-1) #Keep slighly larger std for expert
             print(f"Loaded BC policy weights from {args.bc_policy}")
         model.learn(total_timesteps=hparam['n_timesteps'], callback=eval_callback)
 

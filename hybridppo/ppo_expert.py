@@ -107,8 +107,8 @@ class ExpertRolloutBuffer(RolloutBuffer):
                 next_values = self.values[step + 1]
 
             ratio = np.exp(self.log_probs[step] - self.log_prob_expert[step])  # ratio = p(a|s) / p(a|s, expert)
-            rho = np.clip(ratio, 1e-3, rho_bar)
-            c = np.clip(ratio, 1e-3, c_bar)
+            rho = np.clip(ratio, 0.1, rho_bar)
+            c = np.clip(ratio, 0.1, c_bar)
             # next_ratio = np.clip(next_ratio, 1e-5, 1)
             delta = (self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step])*rho
             # last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
@@ -265,6 +265,7 @@ class PPOExpert(OnPolicyAlgorithm):
                 log_std_final: Optional[float] = None,
             log_std_subtract: float = 0.0,
     ):
+        print(f"DEBUG: PPOExpert.__init__ received device={device}")
         super().__init__(
             policy,
             env,
@@ -337,7 +338,7 @@ class PPOExpert(OnPolicyAlgorithm):
             self.minari_transition_dataset,
             batch_sampler=parallel_sequential_sampler,
             collate_fn=partial(collate_env_batch, n_envs=self.num_expert_envs, batch_size=n_steps),
-            num_workers=4,
+            num_workers=0,
             shuffle=False,
         )
         self.minari_transition_iterator = iter(self.minari_transition_dataloader)
@@ -508,20 +509,21 @@ class PPOExpert(OnPolicyAlgorithm):
                         "advantages_max": [], "ratio_old_expert_max": [], "ratio_old_expert_min": [],
                         "ratio_current_old_max": [], "ratio_current_old_min": [], "mahalanobis_distance": [], "log_prob_expert": []}
 
-        confidence_level = 0.8
+        confidence_level = 0.95
 
         # Calculate Chi-Square value for 95.7% confidence and n dimensions
         chi2_value = chi2.ppf(confidence_level, df=self.policy.log_std.shape[-1])  # action_dim
 
         # Mahalanobis distance threshold (square root of chi2). Distance from Gaussian distribution follows chi2 distribution
         mahalanobis_threshold = np.sqrt(chi2_value)
+        print("Mahalanobis distance threshold set to: ", mahalanobis_threshold)
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
-            print("Epoch ", epoch, "of ", self.n_epochs)
+            # print("Epoch ", epoch, "of ", self.n_epochs, "using mix ratio ", self.mix_ratio)
             approx_kl_divs = []
             # Split minibatch by configured mix ratio
-            offline_bs = max(1, int(self.batch_size * self.mix_ratio))
-            online_bs = max(1, self.batch_size - offline_bs)
+            offline_bs = max(0, int(self.batch_size * self.mix_ratio))
+            online_bs = max(0, self.batch_size - offline_bs)
             offline_data_buffer = self.expert_buffer.get(offline_bs)
             online_data_buffer = self.rollout_buffer.get(online_bs)
             # Do a complete pass on the rollout buffer
@@ -557,6 +559,8 @@ class PPOExpert(OnPolicyAlgorithm):
                     actions_offline,
                 )
 
+                log_prob_offline = th.clamp(log_prob_offline, min=-100.0, max=100.0)
+
 
 
                 #Predict actions and log_probs for offline actions
@@ -582,7 +586,9 @@ class PPOExpert(OnPolicyAlgorithm):
                 # min_log_prob = -1.*self.env.action_space.shape[0]
 
                 old_log_prob_offline = offline_batch.old_log_prob
+                old_log_prob_offline = th.clamp(old_log_prob_offline, min=-100.0, max=100.0)
                 log_prob_expert = offline_batch.log_prob_expert
+                log_prob_expert = th.clamp(log_prob_expert, min=-100.0, max=100.0)
 
                 # Dial to weigh expert data vs online data. If expert data is from a similar policy (Inputs/Outputs) keep it lowg
                 values_online = values_online.flatten()
@@ -591,8 +597,6 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 # Normalize advantage
 
-                ratio_old_expert_offline = th.clamp(th.exp(
-                    offline_batch.old_log_prob - log_prob_expert), max = 1.0, min=1e-3)
                 # ratio_old_expert_offline_uc = th.clamp(th.exp(
                 #     offline_batch.old_log_prob - log_prob_expert), max=1.0)
 
@@ -638,6 +642,10 @@ class PPOExpert(OnPolicyAlgorithm):
                 ratio_current_old_offline = th.clamp(ratio_current_old_offline, 0.2, 5.0)
                 ratio_current_expert_offline = th.exp(log_ratio_current_expert_offline)
                 ratio_current_expert_offline = th.clamp(ratio_current_expert_offline, 1e-3, 2.0)
+                ratio_old_expert_offline = th.clamp(th.exp(
+                    th.clamp(offline_batch.old_log_prob - log_prob_expert, max = 1000.0, min=-1000)), max=1.0, min=0.1)
+                
+
 
                 ratio_current_old_online = th.exp(log_prob_online - online_batch.old_log_prob)
                 # ratio_current_old_offline = th.exp(
@@ -656,12 +664,12 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 # clipped surrogate loss for offline
                 #normalizs the ratio_current_old_offline
-                policy_loss_1_offline = advantages_offline * ratio_current_old_offline * ratio_current_expert_offline
+                policy_loss_1_offline = advantages_offline * ratio_current_old_offline
                 # Old/expert ratio is already multiplied
                 # old/expert*current/old = current/expert (Expert sampled the data)
                 policy_loss_2_offline = advantages_offline * th.clamp(ratio_current_old_offline, 1 - clip_range,
-                                                                     1 + clip_range)* ratio_current_expert_offline
-                policy_loss_offline = -th.mean(th.min(policy_loss_1_offline, policy_loss_2_offline)* weight_offline)
+                                                                     1 + clip_range)
+                policy_loss_offline = -th.mean(th.min(policy_loss_1_offline, policy_loss_2_offline)* ratio_old_expert_offline)
 
                 if self.clip_range_vf is None:
                     # No clipping
@@ -737,27 +745,29 @@ class PPOExpert(OnPolicyAlgorithm):
                 logs_online["log_prob"].append(log_prob_online.mean().item())
                 logs_online["advantages"].append(advantages_online.mean().item())
 
-                # Log offline data
-                logs_offline["ratio_current_old"].append(ratio_current_old_offline.mean().item())
-                logs_offline["ratio_current_old_max"].append(ratio_current_old_offline.max().item())
-                logs_offline["ratio_current_old_min"].append(ratio_current_old_offline.min().item())
-                logs_offline["log_prob_expert"].append(log_prob_expert.mean().item())
-                logs_offline["policy_loss"].append(policy_loss_offline.item())
-                # logs_offline["value_loss"].append(value_loss_offline.item())
-                logs_offline["entropy_loss"].append(entropy_loss_offline.item())
-                logs_offline["approx_kl_div"].append(approx_kl_div_offline)
-                logs_offline["clip_fraction"].append(clip_fraction_offline)
-                logs_offline["clamp_fraction"].append(clamp_fraction_offline)
-                logs_offline["advantages"].append(advantages_offline.mean().item())
-                logs_offline["max_log_prob"].append(log_prob_offline.max().item())
-                logs_offline["min_log_prob"].append(log_prob_offline.min().item())
-                logs_offline["log_prob"].append(log_prob_offline.mean().item())
-                logs_offline["ratio_old_expert"].append(ratio_old_expert_offline.mean().item())
-                logs_offline["ratio_old_expert_max"].append(ratio_old_expert_offline.max().item())
-                logs_offline["ratio_old_expert_min"].append(ratio_old_expert_offline.min().item())
-                logs_offline["advantages_min"].append(advantages_offline.min().item())
-                logs_offline["advantages_max"].append(advantages_offline.max().item())
-                logs_offline["mahalanobis_distance"].append(mahalanobis_distance.mean().item())
+                if offline_bs != 0:
+
+                    # Log offline data
+                    logs_offline["ratio_current_old"].append(ratio_current_old_offline.mean().item())
+                    logs_offline["ratio_current_old_max"].append(ratio_current_old_offline.max().item())
+                    logs_offline["ratio_current_old_min"].append(ratio_current_old_offline.min().item())
+                    logs_offline["log_prob_expert"].append(log_prob_expert.mean().item())
+                    logs_offline["policy_loss"].append(policy_loss_offline.item())
+                    # logs_offline["value_loss"].append(value_loss_offline.item())
+                    logs_offline["entropy_loss"].append(entropy_loss_offline.item())
+                    logs_offline["approx_kl_div"].append(approx_kl_div_offline)
+                    logs_offline["clip_fraction"].append(clip_fraction_offline)
+                    logs_offline["clamp_fraction"].append(clamp_fraction_offline)
+                    logs_offline["advantages"].append(advantages_offline.mean().item())
+                    logs_offline["max_log_prob"].append(log_prob_offline.max().item())
+                    logs_offline["min_log_prob"].append(log_prob_offline.min().item())
+                    logs_offline["log_prob"].append(log_prob_offline.mean().item())
+                    logs_offline["ratio_old_expert"].append(ratio_old_expert_offline.mean().item())
+                    logs_offline["ratio_old_expert_max"].append(ratio_old_expert_offline.max().item())
+                    logs_offline["ratio_old_expert_min"].append(ratio_old_expert_offline.min().item())
+                    logs_offline["advantages_min"].append(advantages_offline.min().item())
+                    logs_offline["advantages_max"].append(advantages_offline.max().item())
+                    logs_offline["mahalanobis_distance"].append(mahalanobis_distance.mean().item())
                 # print(advantages_offline.min().item(), advantages_offline.max().item(), ratio_old_expert_offline.mean().item(),)
                 # Optimization step
                 self.policy.optimizer.zero_grad()
@@ -820,7 +830,6 @@ class PPOExpert(OnPolicyAlgorithm):
         bc_save_path: Optional[str] = None,
         log_interval: int = 100,
         bc_coeff: float = 1.0,
-        warm_start_steps: int = 0,
         val_dataloader: Optional[DataLoader] = None,
         val_batches_per_epoch: Optional[int] = None,
         save_every_epochs: int = 5,
@@ -869,8 +878,11 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 obs = batch["observations"].to(self.device)
                 actions = batch["actions"].to(self.device)
-                obs = obs.reshape(-1, *obs.shape[2:])
-                actions = actions.reshape(-1, *actions.shape[2:])
+                
+                # Handle legacy [T, B, ...] shape if present
+                if obs.ndim > len(self.observation_space.shape) + 1:
+                    obs = obs.reshape(-1, *obs.shape[2:])
+                    actions = actions.reshape(-1, *actions.shape[2:])
 
                 if isinstance(self.action_space, spaces.Discrete) or isinstance(self.action_space, spaces.MultiDiscrete):
                     actions = actions.long()
@@ -914,8 +926,12 @@ class PPOExpert(OnPolicyAlgorithm):
 
                     obs_v = val_batch["observations"].to(self.device)
                     acts_v = val_batch["actions"].to(self.device)
-                    obs_v = obs_v.reshape(-1, *obs_v.shape[2:])
-                    acts_v = acts_v.reshape(-1, *acts_v.shape[2:])
+                    
+                    # Handle legacy [T, B, ...] shape if present
+                    if obs_v.ndim > len(self.observation_space.shape) + 1:
+                        obs_v = obs_v.reshape(-1, *obs_v.shape[2:])
+                        acts_v = acts_v.reshape(-1, *acts_v.shape[2:])
+                    
                     if isinstance(self.action_space, spaces.Discrete) or isinstance(self.action_space, spaces.MultiDiscrete):
                         acts_v = acts_v.long()
 
@@ -948,9 +964,6 @@ class PPOExpert(OnPolicyAlgorithm):
                 and (epoch + 1) >= min_save_epoch
                 and (epoch + 1) % save_every_epochs == 0
             ):
-                # Optional value-only finetune on fresh rollouts before saving
-                if warm_start_steps > 0:
-                    self._value_finetune_rollouts(num_episodes=100)
                 # Use a clean epoch-based suffix; avoid embedding loss in filename
                 save_path = Path(bc_save_path + f"_epoch{epoch+1}")
                 save_path.parent.mkdir(parents=True, exist_ok=True)
