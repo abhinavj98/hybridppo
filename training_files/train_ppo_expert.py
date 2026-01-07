@@ -21,13 +21,33 @@ from torch import nn
 from stable_baselines3.common.policies import MultiInputActorCriticPolicy
 from hybridppo.policies import MlpPolicyExpert
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import SubprocVecEnv
 #Import linear LR, Scheduler
 from torch.optim.lr_scheduler import LinearLR, SequentialLR
 import yaml
 import random
 import string
 import wandb
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
+from gymnasium.wrappers import RecordVideo
+
+class WandbVideoCallback(BaseCallback):
+    def __init__(self, video_folder, verbose=0):
+        super().__init__(verbose)
+        self.video_folder = video_folder
+        self.uploaded_files = set()
+
+    def _on_step(self) -> bool:
+        if not os.path.exists(self.video_folder):
+            return True
+        video_files = [f for f in os.listdir(self.video_folder) if f.endswith(".mp4")]
+        for f in video_files:
+            full_path = os.path.join(self.video_folder, f)
+            if full_path not in self.uploaded_files:
+                wandb.log({"video": wandb.Video(full_path, fps=30, format="mp4")})
+                self.uploaded_files.add(full_path)
+        return True
+
 def init_wandb(params):
     wandb.init(
         project="HybridPPO",
@@ -99,12 +119,18 @@ if __name__ == "__main__":
             wandb_params['bc_policy'] = args.bc_policy
 
         init_wandb(wandb_params)
-        env = make_vec_env(lambda: gym.make(dataset.env_spec), n_envs=hparam['n_envs'], monitor_dir=None)
-        eval_env = gym.make(dataset.env_spec, render_mode="human")
+        env = make_vec_env(lambda: gym.make(dataset.env_spec), n_envs=hparam['n_envs'], monitor_dir=None, vec_env_cls=SubprocVecEnv)
+
+        video_folder = f"./videos/{args.env}/{args.save_file}_{i}"
+        eval_env = gym.make(dataset.env_spec, render_mode="rgb_array")
+        eval_env = RecordVideo(eval_env, video_folder=video_folder, episode_trigger=lambda x: x % 5 == 0)
         eval_env = Monitor(eval_env, filename=None, allow_early_resets=True)
+
+        video_callback = WandbVideoCallback(video_folder)
         eval_callback = EvalCallback(eval_env, best_model_save_path="./logs/",
                                      log_path="./logs/", eval_freq=50000,
-                                     deterministic=True, render=False)
+                                     deterministic=True, render=False,
+                                     callback_after_eval=video_callback)
         #Eval callback
 
         log_prob_expert = r#-np.log(r) + env.action_space.shape[0] * 0.699 #-logr -D/2logpi

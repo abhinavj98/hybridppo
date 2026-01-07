@@ -338,7 +338,7 @@ class PPOExpert(OnPolicyAlgorithm):
             self.minari_transition_dataset,
             batch_sampler=parallel_sequential_sampler,
             collate_fn=partial(collate_env_batch, n_envs=self.num_expert_envs, batch_size=n_steps),
-            num_workers=0,
+            num_workers=4,
             shuffle=False,
         )
         self.minari_transition_iterator = iter(self.minari_transition_dataloader)
@@ -515,7 +515,7 @@ class PPOExpert(OnPolicyAlgorithm):
         chi2_value = chi2.ppf(confidence_level, df=self.policy.log_std.shape[-1])  # action_dim
 
         # Mahalanobis distance threshold (square root of chi2). Distance from Gaussian distribution follows chi2 distribution
-        mahalanobis_threshold = np.sqrt(chi2_value)
+        mahalanobis_threshold = np.sqrt(chi2_value) * 2 #Scaling factor of 2 to be more lenient
         print("Mahalanobis distance threshold set to: ", mahalanobis_threshold)
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
@@ -559,7 +559,7 @@ class PPOExpert(OnPolicyAlgorithm):
                     actions_offline,
                 )
 
-                log_prob_offline = th.clamp(log_prob_offline, min=-100.0, max=100.0)
+                log_prob_offline = th.clamp(log_prob_offline, min=-1000.0)
 
 
 
@@ -586,9 +586,9 @@ class PPOExpert(OnPolicyAlgorithm):
                 # min_log_prob = -1.*self.env.action_space.shape[0]
 
                 old_log_prob_offline = offline_batch.old_log_prob
-                old_log_prob_offline = th.clamp(old_log_prob_offline, min=-100.0, max=100.0)
+                # old_log_prob_offline = th.clamp(old_log_prob_offline, min=-100.0, max=100.0)
                 log_prob_expert = offline_batch.log_prob_expert
-                log_prob_expert = th.clamp(log_prob_expert, min=-100.0, max=100.0)
+                # log_prob_expert = th.clamp(log_prob_expert, min=-100.0, max=100.0)
 
                 # Dial to weigh expert data vs online data. If expert data is from a similar policy (Inputs/Outputs) keep it lowg
                 values_online = values_online.flatten()
@@ -615,6 +615,7 @@ class PPOExpert(OnPolicyAlgorithm):
                 # advantages = th.clamp(advantages, min=-10., max=10.)
                 advantages_online = advantages[:len(advantages_online)]
                 advantages_offline = advantages[len(advantages_online):]
+                advantages_offline = th.clamp(advantages_offline, min=0.0)
                 # Scale advantages for rare events - Gradient at most will be A*k
                 # max_grad = 0.1 #Max norm is 0.5
                 # min_sigma = 0.2
@@ -669,7 +670,7 @@ class PPOExpert(OnPolicyAlgorithm):
                 # old/expert*current/old = current/expert (Expert sampled the data)
                 policy_loss_2_offline = advantages_offline * th.clamp(ratio_current_old_offline, 1 - clip_range,
                                                                      1 + clip_range)
-                policy_loss_offline = -th.mean(th.min(policy_loss_1_offline, policy_loss_2_offline)* ratio_old_expert_offline)
+                policy_loss_offline = -th.mean(th.min(policy_loss_1_offline, policy_loss_2_offline)* ratio_old_expert_offline * weight_offline)
 
                 if self.clip_range_vf is None:
                     # No clipping
@@ -771,11 +772,11 @@ class PPOExpert(OnPolicyAlgorithm):
                 # print(advantages_offline.min().item(), advantages_offline.max().item(), ratio_old_expert_offline.mean().item(),)
                 # Optimization step
                 self.policy.optimizer.zero_grad()
-                loss_offline = offline_loss / 2
+                loss_offline = offline_loss
                 loss_offline.backward()
                 # # Log std should only be updated for online data
                 self.policy.log_std.grad.zero_()
-                loss_online = online_loss / 2
+                loss_online = online_loss
                 loss_online.backward()
                 # Clip grad norm
                 th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
