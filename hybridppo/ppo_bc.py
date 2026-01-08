@@ -194,7 +194,7 @@ class PPOBC(OnPolicyAlgorithm):
             self.minari_transition_dataset,
             batch_sampler=parallel_sequential_sampler,
             collate_fn=partial(collate_env_batch, n_envs=self.num_expert_envs, batch_size=n_steps),
-            num_workers=4
+            num_workers=0
         )
         self.minari_transition_iterator = iter(self.minari_transition_dataloader)
         self._expert_last_obs = None  # type: Optional[Union[np.ndarray, dict[str, np.ndarray]]]
