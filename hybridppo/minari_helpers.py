@@ -4,6 +4,10 @@ import gymnasium as gym
 from hybridppo import DATASET_PATH
 from torch.utils.data import IterableDataset, get_worker_info
 from minari.dataset.episode_data import EpisodeData
+from torch.utils.data import Sampler
+import random
+from torch.utils.data import Sampler
+import random
 
 def get_dataset(dataset: str, env: str, names) -> minari.MinariDataset:
     # names can be a single string or an iterable of strings
@@ -30,7 +34,7 @@ def get_dataset(dataset: str, env: str, names) -> minari.MinariDataset:
             downloaded = minari.download_dataset(url, force_download=True)
             #Save to local path
             print(f"Downloading dataset from {url} to {local_path}")
-            new_dataset = minari.load_dataset(downloaded)
+            new_dataset = minari.load_dataset(url)
             print(f"downloaded dataset has {len(new_dataset)} episodes")
             datasets.append(new_dataset)
 
@@ -49,222 +53,173 @@ def get_eval_environment(minari_dataset: minari.MinariDataset, **kwargs) -> gym.
     return minari_dataset.recover_environment(eval_env=True, **kwargs)
 
 
-# class MinariTransitionDataset(Dataset):
-#     def __init__(self, minari_dataset):
-#         """
-#         Stream transitions (obs, action, reward, next_obs, done) from MinariDataset
-#         without loading everything into memory.
-#         MinariDataset is a Dataset object that returns episodes. We instead return
-#         transitions (obs, action, reward, next_obs, done).
-#         """
-#         self.minari_dataset = minari_dataset # Minari dataset is a Dataset object that return episodes
-#         self.index = []
-#
-#         # # Build (episode_idx, step_idx) index
-#         # for episode_idx, episode in enumerate(minari_dataset):
-#         #     print(episode, episode)
-#         #     num_steps = len(episode)
-#         #     for step_idx in range(num_steps):
-#         #         self.index.append((episode_idx, step_idx))
-#
-#         #List comprehension with zip to make self.index
-#         self.index = [(episode_idx, step_idx) for episode_idx, episode in enumerate(minari_dataset) for
-#                       step_idx in range(len(episode))]
-#
-#     def __len__(self):
-#         return len(self.index)
-#
-#     def __getitem__(self, idx):
-#         #Data iterator will take care of the indexing and batching
-#         episode_idx, step_idx = self.index[idx]
-#         episode = self.minari_dataset[episode_idx]
-#
-#         obs = torch.as_tensor(episode.observations[step_idx], dtype=torch.float32)
-#         next_obs = torch.as_tensor(episode.observations[step_idx + 1], dtype=torch.float32)
-#         action = torch.as_tensor(episode.actions[step_idx], dtype=torch.float32)
-#         reward = torch.as_tensor(episode.rewards[step_idx], dtype=torch.float32)
-#         done = torch.as_tensor(
-#             episode.terminations[step_idx] or episode.truncations[step_idx],
-#             dtype=torch.bool
-#         )
-#
-#         return {
-#             "observations": obs,
-#             "actions": action,
-#             "rewards": reward,
-#             "next_observations": next_obs,
-#             "dones": done
-#         }
-
-import random
-import torch
-from torch.utils.data import IterableDataset
-
-# class MinariTransitionDataset(IterableDataset):
-#     def __init__(self, minari_dataset, num_envs: int):
-#         """
-#         An IterableDataset that returns batches of transitions.
-#         Each row in the batch comes from a separate episode and maintains temporal order.
-#         When an episode ends, it is resampled from the dataset.
-#         """
-#         self.dataset = minari_dataset
-#         self.num_envs = num_envs
-#
-#     def __iter__(self):
-#         # For each slot, initialize an active episode and current step
-#         episode_idxs = [random.randint(0, len(self.dataset) - 1) for _ in range(self.num_envs)]
-#         episodes = [self.dataset[i] for i in episode_idxs]
-#         step_idxs = [0] * self.num_envs
-#
-#         while True:
-#             batch = {
-#                 "observations": [],
-#                 "actions": [],
-#                 "rewards": [],
-#                 "next_observations": [],
-#                 "dones": []
-#             }
-#
-#             for i in range(self.num_envs):
-#                 episode = episodes[i]
-#                 t = step_idxs[i]
-#
-#                 if t >= len(episode.actions):
-#                     # Resample a new episode if the previous one is done
-#                     new_ep_idx = random.randint(0, len(self.dataset) - 1)
-#                     episode = self.dataset[new_ep_idx]
-#                     episodes[i] = episode
-#                     step_idxs[i] = 0
-#                     t = 0
-#
-#                 obs = torch.tensor(episode.observations[t], dtype=torch.float32)
-#                 next_obs = torch.tensor(episode.observations[t + 1], dtype=torch.float32)
-#                 act = torch.tensor(episode.actions[t], dtype=torch.float32)
-#                 rew = torch.tensor(episode.rewards[t], dtype=torch.float32)
-#                 done = torch.tensor(
-#                     episode.terminations[t] or episode.truncations[t],
-#                     dtype=torch.bool
-#                 )
-#
-#                 batch["observations"].append(obs)
-#                 batch["actions"].append(act)
-#                 batch["rewards"].append(rew)
-#                 batch["next_observations"].append(next_obs)
-#                 batch["dones"].append(done)
-#
-#                 step_idxs[i] += 1
-#
-#             yield {k: torch.stack(v) for k, v in batch.items()}
-
-# class MinariTransitionDataset(IterableDataset):
-#     """An IterableDataset that returns batches of transitions.
-#     Always use with num_workers == num_online_envs.
-#     As we need to simulate each trajectory being returned step by step,
-#     by a separate worker, we need to make sure that each worker
-#     is assigned a different episode.
-#     Each worker gets passed a copy of the dataset and samples a different episode.
-#     We then use worker_id to organize our data in the collate fn."""
-#
-#     def __init__(self, minari_dataset):
-#         self.episode_dataset = minari_dataset
-#         self.num_episodes = len(minari_dataset)
-#
-#     def __iter__(self):
-#         worker_info = get_worker_info()
-#         worker_id = worker_info.id if worker_info else 0
-#         rng = random.Random(worker_id)  # Make worker-specific RNG
-#
-#         # Sample one episode for this worker
-#         episode_idx = rng.randint(0, self.num_episodes - 1)
-#         episode = self.episode_dataset[episode_idx]
-#         step = 0
-#
-#         while True:
-#             if step >= len(episode.actions):
-#                 # Resample new episode
-#                 episode_idx = rng.randint(0, self.num_episodes - 1)
-#                 episode = self.episode_dataset[episode_idx]
-#                 step = 0
-#
-#             yield {
-#                 "worker_id": worker_id,
-#                 "episode_id": episode_idx,
-#                 "step_id": step,
-#                 "observation": torch.tensor(episode.observations[step], dtype=torch.float32),
-#                 "action": torch.tensor(episode.actions[step], dtype=torch.float32),
-#                 "reward": torch.tensor(episode.rewards[step], dtype=torch.float32),
-#                 "next_observation": torch.tensor(episode.observations[step + 1], dtype=torch.float32),
-#                 "done": torch.tensor(
-#                     episode.terminations[step] or episode.truncations[step],
-#                     dtype=torch.bool
-#                 )
-#             }
-#             step += 1
-#
-# def collate_fn(batch):
-#     return batch
-#     # # Sort rows by worker_id to preserve env ordering
-#     # # print(batch)
-#     # batch.sort(key=lambda x: x["worker_id"])
-#     #
-#     # return {
-#     #     "worker_ids": torch.tensor([x["worker_id"] for x in batch]),
-#     #     "episode_ids": torch.tensor([x["episode_id"] for x in batch]),
-#     #     "step_ids": torch.tensor([x["step_id"] for x in batch]),
-#     #     "observations": torch.stack([x["observation"] for x in batch]),
-#     #     "actions": torch.stack([x["action"] for x in batch]),
-#     #     "rewards": torch.stack([x["reward"] for x in batch]),
-#     #     "next_observations": torch.stack([x["next_observation"] for x in batch]),
-#     #     "dones": torch.stack([x["done"] for x in batch]),
-#     # }
-
 
 from torch.utils.data import Dataset
 import torch
 
+import numpy as np
+
 class MinariTransitionDataset(Dataset):
-    def __init__(self, minari_dataset):
+    def __init__(self, minari_dataset, preload=False):
         self.minari_dataset = minari_dataset
+        self.preload = preload
+        
+        # Build episode index map (episode_id, step_in_episode) -> global_idx
         self.index_map = []
-
-        #Index - (episode_id, step_id) for each transition
+        total_transitions = 0
+        
         for ep_id, episode in enumerate(minari_dataset):
-            for step in range(len(episode.actions) - 1):
-                self.index_map.append((ep_id, step))
+            if len(episode.actions) < 1:
+                continue
+            n_steps = len(episode.actions) - 1
+            for step_id in range(n_steps):
+                self.index_map.append((ep_id, step_id))
+            total_transitions += n_steps
+        
+        if preload:
+            print(f"Pre-loading {len(minari_dataset)} episodes into RAM...")
+            self._preload_data()
+        else:
+            print(f"Lazy loading enabled for {total_transitions} transitions from {len(minari_dataset)} episodes.")
+    
+    def _preload_data(self):
+        obs_list = []
+        act_list = []
+        rew_list = []
+        next_obs_list = []
+        done_list = []
+        ep_id_list = []
+        step_id_list = []
 
-        # (episode_id, step_id) -> index mapping
-        self.episode_to_indices = {}
-        for idx, (ep_id, step_id) in enumerate(self.index_map):
-            self.episode_to_indices.setdefault(ep_id, []).append(idx)
+        for ep_id, episode in enumerate(self.minari_dataset):
+            # Skip empty episodes
+            if len(episode.actions) < 1:
+                continue
 
-    def __getitem__(self, idx):
-        # Get the episode and step from the index map and return
-        # Custom sampling logic makes sure that the index are in order
+            # obs: 0 to T-2 (inclusive) -> slice [:-2]
+            # next_obs: 1 to T-1 (inclusive) -> slice [1:-1]
+            # actions/rewards/dones: 0 to T-2 -> slice [:-1]
+            
+            obs_list.append(episode.observations[:-2])
+            next_obs_list.append(episode.observations[1:-1])
+            act_list.append(episode.actions[:-1])
+            rew_list.append(episode.rewards[:-1])
+            
+            terminations = episode.terminations[:-1]
+            truncations = episode.truncations[:-1]
+            dones = np.logical_or(terminations, truncations).astype(np.float32)
+            done_list.append(dones)
+            
+            # Metadata
+            n_steps = len(episode.actions) - 1
+            ep_id_list.append(np.full(n_steps, ep_id, dtype=np.int64))
+            step_id_list.append(np.arange(n_steps, dtype=np.int64))
 
-        ep_id, step = self.index_map[idx]
-        episode = self.minari_dataset[ep_id]
-
-        return {
-            "episode_ids": torch.tensor(ep_id),
-            "step_ids": torch.tensor(step),
-            "observations": torch.tensor(episode.observations[step], dtype=torch.float32),
-            "actions": torch.tensor(episode.actions[step], dtype=torch.float32),
-            "rewards": torch.tensor(episode.rewards[step], dtype=torch.float32),
-            "next_observations": torch.tensor(episode.observations[step + 1], dtype=torch.float32),
-            "dones": torch.tensor(
-                episode.terminations[step] or episode.truncations[step],
-                dtype=torch.bool
-            )
-        }
+        # Concatenate all into single tensors
+        self.observations = torch.tensor(np.concatenate(obs_list), dtype=torch.float32)
+        self.next_observations = torch.tensor(np.concatenate(next_obs_list), dtype=torch.float32)
+        self.actions = torch.tensor(np.concatenate(act_list), dtype=torch.float32)
+        self.rewards = torch.tensor(np.concatenate(rew_list), dtype=torch.float32)
+        self.dones = torch.tensor(np.concatenate(done_list), dtype=torch.float32)
+        self.episode_ids_tensor = torch.tensor(np.concatenate(ep_id_list), dtype=torch.int64)
+        self.step_ids_tensor = torch.tensor(np.concatenate(step_id_list), dtype=torch.int64)
+        
+        print(f"Loaded {len(self.observations)} transitions.")
 
     def __len__(self):
+        if self.preload:
+            return len(self.observations)
         return len(self.index_map)
 
+    def __getitem__(self, idx):
+        if self.preload:
+            return {
+                'observations': self.observations[idx],
+                'actions': self.actions[idx],
+                'rewards': self.rewards[idx],
+                'next_observations': self.next_observations[idx],
+                'dones': self.dones[idx],
+                'episode_ids': self.episode_ids_tensor[idx],
+                'step_ids': self.step_ids_tensor[idx],
+            }
+        else:
+            # Lazy loading
+            ep_id, step_id = self.index_map[idx]
+            episode = self.minari_dataset[ep_id]
+            
+            obs = episode.observations[step_id]
+            next_obs = episode.observations[step_id + 1]
+            action = episode.actions[step_id]
+            reward = episode.rewards[step_id]
+            
+            termination = episode.terminations[step_id]
+            truncation = episode.truncations[step_id]
+            done = float(termination or truncation)
+            
+            return {
+                'observations': torch.tensor(obs, dtype=torch.float32),
+                'actions': torch.tensor(action, dtype=torch.float32),
+                'rewards': torch.tensor(reward, dtype=torch.float32),
+                'next_observations': torch.tensor(next_obs, dtype=torch.float32),
+                'dones': torch.tensor(done, dtype=torch.float32),
+                'episode_ids': torch.tensor(ep_id, dtype=torch.int64),
+                'step_ids': torch.tensor(step_id, dtype=torch.int64),
+            }
+    
+    def get_episode_to_indices(self):
+        """Build episode_to_indices mapping for sampler compatibility."""
+        episode_to_indices = {}
+        current_idx = 0
+        
+        for ep_id, episode in enumerate(self.minari_dataset):
+            if len(episode.actions) < 1:
+                continue
+            n_steps = len(episode.actions) - 1
+            episode_to_indices[ep_id] = list(range(current_idx, current_idx + n_steps))
+            current_idx += n_steps
+        
+        return episode_to_indices
 
-from torch.utils.data import Sampler
-import random
-from torch.utils.data import Sampler
-import random
+    def __len__(self):
+        if self.preload:
+            return len(self.observations)
+        return len(self.index_map)
+
+    def __getitem__(self, idx):
+        if self.preload:
+            return {
+                'observations': self.observations[idx],
+                'actions': self.actions[idx],
+                'rewards': self.rewards[idx],
+                'next_observations': self.next_observations[idx],
+                'dones': self.dones[idx],
+                'episode_ids': self.episode_ids_tensor[idx],
+                'step_ids': self.step_ids_tensor[idx],
+            }
+        else:
+            # Lazy loading
+            ep_id, step_id = self.index_map[idx]
+            episode = self.minari_dataset[ep_id]
+            
+            obs = episode.observations[step_id]
+            next_obs = episode.observations[step_id + 1]
+            action = episode.actions[step_id]
+            reward = episode.rewards[step_id]
+            
+            termination = episode.terminations[step_id]
+            truncation = episode.truncations[step_id]
+            done = float(termination or truncation)
+            
+            return {
+                'observations': torch.tensor(obs, dtype=torch.float32),
+                'actions': torch.tensor(action, dtype=torch.float32),
+                'rewards': torch.tensor(reward, dtype=torch.float32),
+                'next_observations': torch.tensor(next_obs, dtype=torch.float32),
+                'dones': torch.tensor(done, dtype=torch.float32),
+                'episode_ids': torch.tensor(ep_id, dtype=torch.int64),
+                'step_ids': torch.tensor(step_id, dtype=torch.int64),
+            }
+
 
 class MultiEpisodeSequentialSampler(Sampler):
     """The purpose of this sample is to yield indexes of transitions
@@ -278,7 +233,7 @@ class MultiEpisodeSequentialSampler(Sampler):
         self.batch_size = batch_size
         self.rng = random.Random(seed)
 
-        self.ep_indices = dataset.episode_to_indices
+        self.ep_indices = dataset.get_episode_to_indices()
         self.available_episodes = list(self.ep_indices.keys())
 
     def _sample_episode(self):

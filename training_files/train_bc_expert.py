@@ -22,39 +22,75 @@ from torch.utils.data import DataLoader, Dataset
 
 
 class SubsetMinariTransitionDataset(Dataset):
-    """A subset of MinariTransitionDataset filtered by episode ids."""
+    """A subset of MinariTransitionDataset filtered by episode ids, pre-loaded into RAM."""
 
     def __init__(self, minari_dataset, episode_ids):
         self.minari_dataset = minari_dataset
         self.episode_ids = list(episode_ids)
-        self.index_map = []
+        
+        obs_list = []
+        act_list = []
+        rew_list = []
+        next_obs_list = []
+        done_list = []
+        ep_id_list = []
+        step_id_list = []
+
+        print(f"Pre-loading {len(self.episode_ids)} episodes into RAM...")
         for ep_id in self.episode_ids:
             episode = self.minari_dataset[ep_id]
-            for step in range(len(episode.actions) - 1):
-                self.index_map.append((ep_id, step))
+            
+            # Skip empty episodes
+            if len(episode.actions) < 1:
+                continue
 
-        self.episode_to_indices = {}
-        for idx, (ep_id, step_id) in enumerate(self.index_map):
-            self.episode_to_indices.setdefault(ep_id, []).append(idx)
+            # We use the same slicing logic as the original code:
+            # It iterates range(len(episode.actions) - 1), effectively skipping the last transition.
+            # Assuming len(obs) == len(act) + 1
+            
+            # obs: 0 to T-2 (inclusive) -> slice [:-2]
+            # next_obs: 1 to T-1 (inclusive) -> slice [1:-1]
+            # actions/rewards/dones: 0 to T-2 -> slice [:-1]
+            
+            obs_list.append(episode.observations[:-2])
+            next_obs_list.append(episode.observations[1:-1])
+            act_list.append(episode.actions[:-1])
+            rew_list.append(episode.rewards[:-1])
+            
+            terminations = episode.terminations[:-1]
+            truncations = episode.truncations[:-1]
+            dones = np.logical_or(terminations, truncations).astype(np.float32)
+            done_list.append(dones)
+            
+            # Metadata
+            n_steps = len(episode.actions) - 1
+            ep_id_list.append(np.full(n_steps, ep_id, dtype=np.int64))
+            step_id_list.append(np.arange(n_steps, dtype=np.int64))
+
+        # Concatenate all into single tensors
+        self.observations = torch.tensor(np.concatenate(obs_list), dtype=torch.float32)
+        self.next_observations = torch.tensor(np.concatenate(next_obs_list), dtype=torch.float32)
+        self.actions = torch.tensor(np.concatenate(act_list), dtype=torch.float32)
+        self.rewards = torch.tensor(np.concatenate(rew_list), dtype=torch.float32)
+        self.dones = torch.tensor(np.concatenate(done_list), dtype=torch.float32)
+        self.episode_ids_tensor = torch.tensor(np.concatenate(ep_id_list), dtype=torch.int64)
+        self.step_ids_tensor = torch.tensor(np.concatenate(step_id_list), dtype=torch.int64)
+        
+        print(f"Loaded {len(self.observations)} transitions.")
 
     def __getitem__(self, idx):
-        ep_id, step = self.index_map[idx]
-        episode = self.minari_dataset[ep_id]
         return {
-            "episode_ids": torch.tensor(ep_id),
-            "step_ids": torch.tensor(step),
-            "observations": torch.tensor(episode.observations[step], dtype=torch.float32),
-            "actions": torch.tensor(episode.actions[step], dtype=torch.float32),
-            "rewards": torch.tensor(episode.rewards[step], dtype=torch.float32),
-            "next_observations": torch.tensor(episode.observations[step + 1], dtype=torch.float32),
-            "dones": torch.tensor(
-                episode.terminations[step] or episode.truncations[step],
-                dtype=torch.bool,
-            ),
+            "episode_ids": self.episode_ids_tensor[idx],
+            "step_ids": self.step_ids_tensor[idx],
+            "observations": self.observations[idx],
+            "actions": self.actions[idx],
+            "rewards": self.rewards[idx],
+            "next_observations": self.next_observations[idx],
+            "dones": self.dones[idx],
         }
 
     def __len__(self):
-        return len(self.index_map)
+        return len(self.observations)
 
 # conda activate hybrid-ppo && python ./training_files/train_bc_expert.py --dataset mujoco --env walker2d --names expert-v0 --hparam Walker2d-v4-bc-large --bc_epochs 50 --bc_batch_size 128 --bc_coeff 0.005 --warm_start_steps 100 --save_dir bc_checkpoints --log_interval 10
 if __name__ == "__main__":
@@ -66,7 +102,7 @@ if __name__ == "__main__":
     parser.add_argument("--bc_epochs", type=int, default=5)
     parser.add_argument("--bc_batch_size", type=int, default=None)
     parser.add_argument("--bc_coeff", type=float, default=1.0, help="Coefficient to scale the BC log-prob loss")
-    parser.add_argument("--warm_start_steps", type=int, default=0, help="If >0, run value-only finetune rollouts each epoch")
+    # parser.add_argument("--warm_start_steps", type=int, default=0, help="If >0, run value-only finetune rollouts each epoch")
     parser.add_argument("--save_every_epochs", type=int, default=5, help="Save BC checkpoint every N epochs (<=0 to disable)")
     parser.add_argument("--save_dir", type=str, default="bc_checkpoints")
     parser.add_argument("--save_name", type=str, default=None)
@@ -74,6 +110,8 @@ if __name__ == "__main__":
     parser.add_argument("--val_fraction", type=float, default=0.1, help="Fraction of episodes for validation")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"],
                         help="Torch device for BC training")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
     args = parser.parse_args()
 
     with open("hparam.yml", "r") as f:
@@ -96,6 +134,19 @@ if __name__ == "__main__":
     else:
         device = args.device
     print(f"Using device: {device}")
+    print(f"DEBUG: torch.cuda.is_available() -> {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"DEBUG: torch.version.cuda -> {torch.version.cuda}")
+        print(f"DEBUG: torch.cuda.device_count() -> {torch.cuda.device_count()}")
+        print(f"DEBUG: torch.cuda.current_device() -> {torch.cuda.current_device()}")
+        print(f"DEBUG: torch.cuda.get_device_name(0) -> {torch.cuda.get_device_name(0)}")
+
+
+    # Reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if device == "cuda":
+        torch.cuda.manual_seed_all(args.seed)
 
     policy_kwargs = {
         "log_std_init": hparam.get("log_std_init", 0),
@@ -121,24 +172,20 @@ if __name__ == "__main__":
     transitions_per_batch = max(1, bc_batch_size * n_envs)
     val_batches_per_epoch = max(1, math.ceil(len(val_ds) / transitions_per_batch))
 
-    train_sampler = MultiEpisodeSequentialSampler(train_ds, n_envs=n_envs, batch_size=n_steps)
-    val_sampler = MultiEpisodeSequentialSampler(val_ds, n_envs=n_envs, batch_size=n_steps)
-
     train_loader = DataLoader(
         train_ds,
-        batch_sampler=train_sampler,
-        collate_fn=partial(collate_env_batch, n_envs=n_envs, batch_size=n_steps),
-        num_workers=4,
-        shuffle=False,
+        batch_size=transitions_per_batch,
+        num_workers=args.num_workers,
+        shuffle=True,
     )
     val_loader = DataLoader(
         val_ds,
-        batch_sampler=val_sampler,
-        collate_fn=partial(collate_env_batch, n_envs=n_envs, batch_size=n_steps),
-        num_workers=4,
+        batch_size=transitions_per_batch,
+        num_workers=args.num_workers,
         shuffle=False,
     )
 
+    print(f"DEBUG: Calling PPOExpert with device={device}")
     model = PPOExpert(
         MlpPolicyExpert,
         env,
@@ -166,22 +213,24 @@ if __name__ == "__main__":
     model.minari_transition_dataloader = train_loader
     model.minari_transition_iterator = iter(train_loader)
 
-    save_root = Path(args.save_dir) / args.dataset / args.env
+    save_root = Path(args.save_dir) / args.dataset / args.env / ''.join(args.names)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_name = args.save_name or f"bc_{args.env}_{timestamp}"
     bc_save_path = save_root / save_name
 
     print(f"Training BC policy for dataset {args.names} -> saving to {bc_save_path}.zip")
+    # Metrics file alongside checkpoints
+    metrics_path = (bc_save_path.parent / f"{bc_save_path.name}_metrics.csv").as_posix()
     model.train_bc(
         total_epochs=args.bc_epochs,
-        bc_batch_size=args.bc_batch_size,
+        bc_batch_size=transitions_per_batch,  # use resolved per-update batch size
         bc_save_path=str(bc_save_path),
         log_interval=args.log_interval,
         bc_coeff=args.bc_coeff,
-        warm_start_steps=args.warm_start_steps,
         val_dataloader=val_loader,
         val_batches_per_epoch=val_batches_per_epoch,
         save_every_epochs=args.save_every_epochs,
+        metrics_path=metrics_path,
     )
 
     env.close()
