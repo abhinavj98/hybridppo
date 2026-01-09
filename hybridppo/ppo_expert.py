@@ -110,7 +110,7 @@ class ExpertRolloutBuffer(RolloutBuffer):
             delta = (self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step])*rho
             # last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
             #For retrace
-            last_gae_lam = delta + self.gamma* next_non_terminal * last_gae_lam*c
+            last_gae_lam = delta + self.gamma* self.gae_lambda*next_non_terminal * last_gae_lam*c
             self.advantages[step] = last_gae_lam
         self.returns = self.advantages + self.values
 

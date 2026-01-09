@@ -10,3 +10,5 @@ BUG_REPORT.md
 CODEBASE_SUMMARY.md
 bc_checkpoints/
 mujoco/
+videos/
+hybridppo.egg-info/
