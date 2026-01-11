@@ -157,7 +157,7 @@ if __name__ == "__main__":
             model.expert_policy = deepcopy(model.policy)
             #Set expert policy log std as constant
             model.policy.log_std.data.fill_(-1)
-            model.expert_policy.log_std.data.fill_(-1) #Keep slighly larger std for expert
+            model.expert_policy.log_std.data.fill_(-0.7) #Keep slighly larger std for expert
             print(f"Loaded BC policy weights from {args.bc_policy}")
         model.learn(total_timesteps=hparam['n_timesteps'], callback=eval_callback)
 
