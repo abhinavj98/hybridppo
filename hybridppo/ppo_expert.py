@@ -107,10 +107,10 @@ class ExpertRolloutBuffer(RolloutBuffer):
                 next_values = self.values[step + 1]
 
             ratio = np.exp(self.log_probs[step] - self.log_prob_expert[step])  # ratio = p(a|s) / p(a|s, expert)
-            rho = np.clip(ratio, 0.1, rho_bar)
-            c = np.clip(ratio, 0.1, c_bar)
+            rho = np.clip(ratio, 0.5, rho_bar)
+            c = np.clip(ratio, 0.5, c_bar)
             # next_ratio = np.clip(next_ratio, 1e-5, 1)
-            delta = (self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step])*rho
+            delta = (self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step])* rho
             # last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
             #For retrace
             last_gae_lam = delta + self.gamma* self.gae_lambda*next_non_terminal * last_gae_lam*c
@@ -264,6 +264,7 @@ class PPOExpert(OnPolicyAlgorithm):
                 std_decay: bool = False,
                 log_std_final: Optional[float] = None,
             log_std_subtract: float = 0.0,
+            reinit_critic: bool = False,
     ):
         print(f"DEBUG: PPOExpert.__init__ received device={device}")
         super().__init__(
@@ -355,7 +356,8 @@ class PPOExpert(OnPolicyAlgorithm):
         # Std decay schedule config
         self.std_decay = bool(std_decay)
         self.log_std_final = log_std_final
-
+        # Reinitialize critic with orthogonal init
+        self.reinit_critic = bool(reinit_critic)
 
         #To make it compatible with stable baselines3 API and buffer
         #Minari Dataloader should return batch_size * n_envs in total
@@ -383,6 +385,10 @@ class PPOExpert(OnPolicyAlgorithm):
                 assert self.clip_range_vf > 0, "`clip_range_vf` must be positive, " "pass `None` to deactivate vf clipping"
 
             self.clip_range_vf = get_schedule_fn(self.clip_range_vf)
+        
+        # Store initial gae_lambda for scheduling (1.0 -> 0.95)
+        self._gae_lambda_initial = 1.0
+        self._gae_lambda_final = 0.95
         buffer_cls = DictRolloutBuffer if isinstance(self.observation_space, spaces.Dict) else RolloutBuffer
 
         self.expert_buffer = ExpertRolloutBuffer(
@@ -406,6 +412,38 @@ class PPOExpert(OnPolicyAlgorithm):
                 self._initial_log_std = self.policy.log_std.detach().clone()
         else:
             self._initial_log_std = None
+
+        # Reinitialize critic with orthogonal init and small gain on last layer
+        if self.reinit_critic:
+            self._reinit_critic_ortho()
+
+    def _reinit_critic_ortho(self, hidden_gain: float = np.sqrt(2), output_gain: float = 0.01) -> None:
+        """Reinitialize critic network with orthogonal initialization.
+        
+        Hidden layers use gain=sqrt(2), output layer uses small gain for stable value estimates.
+        
+        :param hidden_gain: Gain for hidden layer weights (default: sqrt(2) for ReLU).
+        :param output_gain: Gain for output layer weights (default: 0.01 for small initial values).
+        """
+        # Reinit mlp_extractor.value_net (hidden layers)
+        if hasattr(self.policy, "mlp_extractor") and hasattr(self.policy.mlp_extractor, "value_net"):
+            for module in self.policy.mlp_extractor.value_net.modules():
+                if isinstance(module, th.nn.Linear):
+                    th.nn.init.orthogonal_(module.weight, gain=hidden_gain)
+                    if module.bias is not None:
+                        th.nn.init.constant_(module.bias, 0.0)
+        
+        # Reinit value_net (output layer) with small gain
+        if hasattr(self.policy, "value_net"):
+            for module in self.policy.value_net.modules():
+                if isinstance(module, th.nn.Linear):
+                    th.nn.init.orthogonal_(module.weight, gain=output_gain)
+                    if module.bias is not None:
+                        th.nn.init.constant_(module.bias, 0.0)
+        
+        if self.verbose > 0:
+            print("INFO: Reinitialized critic with orthogonal init (hidden_gain={}, output_gain={})".format(
+                hidden_gain, output_gain))
 
     def _flatten_obs(self, obs, observation_space):
         """
@@ -476,6 +514,10 @@ class PPOExpert(OnPolicyAlgorithm):
             # Compute value for the last timestep
             values = self.policy.predict_values(next_obs.to(self.device)).squeeze(-1)  # pylint: disable=unexpected-keyword-arg
 
+        # Update gae_lambda based on training progress (1.0 -> 0.95)
+        current_gae_lambda = self._gae_lambda_final + (self._gae_lambda_initial - self._gae_lambda_final) * self._current_progress_remaining
+        expert_buffer.gae_lambda = current_gae_lambda
+        
         expert_buffer.compute_returns_and_advantage(
             last_values=values.cpu().numpy(),
             dones=dones_np,
@@ -515,7 +557,7 @@ class PPOExpert(OnPolicyAlgorithm):
         chi2_value = chi2.ppf(confidence_level, df=self.policy.log_std.shape[-1])  # action_dim
 
         # Mahalanobis distance threshold (square root of chi2). Distance from Gaussian distribution follows chi2 distribution
-        mahalanobis_threshold = np.sqrt(chi2_value) * 2 #Scaling factor of 2 to be more lenient
+        mahalanobis_threshold = np.sqrt(chi2_value)  #Scaling factor of 2 to be more lenient
         print("Mahalanobis distance threshold set to: ", mahalanobis_threshold)
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
@@ -612,10 +654,13 @@ class PPOExpert(OnPolicyAlgorithm):
                 if self.normalize_advantage:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
+                #Clamp outlier advantages since it is normalized
+                advantages = th.clamp(advantages, min=-5., max=5.)
+
                 # advantages = th.clamp(advantages, min=-10., max=10.)
                 advantages_online = advantages[:len(advantages_online)]
                 advantages_offline = advantages[len(advantages_online):]
-                advantages_offline = th.clamp(advantages_offline, min=0.0)
+                
                 # Scale advantages for rare events - Gradient at most will be A*k
                 # max_grad = 0.1 #Max norm is 0.5
                 # min_sigma = 0.2
@@ -625,26 +670,30 @@ class PPOExpert(OnPolicyAlgorithm):
                     mahalanobis_threshold / (mahalanobis_distance + 1e-8),
                     th.ones_like(mahalanobis_distance),
                 )
+                #Set weight offline to 0 where greate than threshold and advantage is negative
+                weight_offline = th.where(
+                    (mahalanobis_distance > mahalanobis_threshold) & (advantages_offline < 0),
+                    th.zeros_like(weight_offline),
+                    weight_offline,
+                )
                 weight_offline = th.clamp(weight_offline, 0.0, 1.0)
+                
 
+                log_ratio_current_expert_offline = log_prob_offline - log_prob_expert #Unused
+                log_ratio_current_expert_offline = th.clamp(log_ratio_current_expert_offline, -20.0, 20.0) #Unused
+                ratio_current_expert_offline = th.exp(log_ratio_current_expert_offline) #Unused
+                ratio_current_expert_offline = th.clamp(ratio_current_expert_offline, 1e-3, 2.0) #Unused
 
-                #Clamp advantages
-                # advantages_offline = th.clamp(advantages_offline, min=-1., max=1.)
-                # advantages_online = th.clamp(advantages_online, min=-1., max=1.)
-                log_ratio_current_old_offline = log_prob_offline - old_log_prob_offline
+        
                 # Max value before exp overflows in float64
                 # max_exp_input = 709.0  for float64
-                # log_ratio_current_old_offline = th.clamp(log_ratio_current_old_offline, min=-10, max=10)
-                log_ratio_current_old_offline = log_prob_offline - old_log_prob_offline
-                log_ratio_current_old_offline = th.clamp(log_ratio_current_old_offline, -20.0, 20.0)
-                log_ratio_current_expert_offline = log_prob_offline - log_prob_expert
-                log_ratio_current_expert_offline = th.clamp(log_ratio_current_expert_offline, -20.0, 20.0)
+        
+                log_ratio_current_old_offline = th.clamp(log_prob_offline - old_log_prob_offline, -50.0, 50.0)
                 ratio_current_old_offline = th.exp(log_ratio_current_old_offline)
-                ratio_current_old_offline = th.clamp(ratio_current_old_offline, 0.2, 5.0)
-                ratio_current_expert_offline = th.exp(log_ratio_current_expert_offline)
-                ratio_current_expert_offline = th.clamp(ratio_current_expert_offline, 1e-3, 2.0)
+                ratio_current_old_offline = th.clamp(ratio_current_old_offline, 0.0, 3.0)
+                
                 ratio_old_expert_offline = th.clamp(th.exp(
-                    th.clamp(offline_batch.old_log_prob - log_prob_expert, max = 1000.0, min=-1000)), max=1.0, min=0.1)
+                    th.clamp(offline_batch.old_log_prob - log_prob_expert, max = 50.0, min=-50)), max=1.0, min=0.01)
                 
 
 
@@ -810,6 +859,9 @@ class PPOExpert(OnPolicyAlgorithm):
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/clip_range", clip_range)
+        # Log current gae_lambda value
+        current_gae_lambda = self._gae_lambda_final + (self._gae_lambda_initial - self._gae_lambda_final) * self._current_progress_remaining
+        self.logger.record("train/gae_lambda", current_gae_lambda)
         self.log_from_rollout_buffer(self.expert_buffer, 'train_offline/')
         self.log_from_rollout_buffer(self.rollout_buffer, 'train_online/')
 
