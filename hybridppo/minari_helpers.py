@@ -60,7 +60,7 @@ import torch
 import numpy as np
 
 class MinariTransitionDataset(Dataset):
-    def __init__(self, minari_dataset, preload=False):
+    def __init__(self, minari_dataset, preload=True):
         self.minari_dataset = minari_dataset
         self.preload = preload
         

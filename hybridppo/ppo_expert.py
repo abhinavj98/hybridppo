@@ -53,7 +53,7 @@ class ExpertRolloutBufferSamples(NamedTuple):
     log_prob_expert: th.Tensor  # New field for expert log probabilities
 
 class ExpertRolloutBuffer(RolloutBuffer):
-    def __init__(self, *args, rho_bar: float = 1.0, c_bar: float = 0.95, **kwargs):
+    def __init__(self, *args, rho_bar: float = 1.5, c_bar: float = 1.0, **kwargs):
         super(ExpertRolloutBuffer, self).__init__(*args, **kwargs)
         # V-trace caps (configurable)
         self.rho_bar = float(rho_bar)
@@ -329,7 +329,7 @@ class PPOExpert(OnPolicyAlgorithm):
 
         #Minari dataset supports iteration over episodes which we use in MinariTransitionDataset
         self.minari_dataset = minari_dataset
-        self.minari_transition_dataset = MinariTransitionDataset(minari_dataset)
+        self.minari_transition_dataset = MinariTransitionDataset(minari_dataset, preload=True)
         parallel_sequential_sampler = MultiEpisodeSequentialSampler(
             self.minari_transition_dataset,
             n_envs=self.num_expert_envs,
@@ -339,7 +339,7 @@ class PPOExpert(OnPolicyAlgorithm):
             self.minari_transition_dataset,
             batch_sampler=parallel_sequential_sampler,
             collate_fn=partial(collate_env_batch, n_envs=self.num_expert_envs, batch_size=n_steps),
-            num_workers=4,
+            num_workers=0,
             shuffle=False,
         )
         self.minari_transition_iterator = iter(self.minari_transition_dataloader)
@@ -516,7 +516,7 @@ class PPOExpert(OnPolicyAlgorithm):
 
         # Update gae_lambda based on training progress (1.0 -> 0.95)
         current_gae_lambda = self._gae_lambda_final + (self._gae_lambda_initial - self._gae_lambda_final) * self._current_progress_remaining
-        expert_buffer.gae_lambda = current_gae_lambda
+        # expert_buffer.gae_lambda = current_gae_lambda
         
         expert_buffer.compute_returns_and_advantage(
             last_values=values.cpu().numpy(),
@@ -549,7 +549,8 @@ class PPOExpert(OnPolicyAlgorithm):
                         "clip_fraction": [], "clamp_fraction": [], "advantages": [], "max_log_prob": [],
                         "min_log_prob": [], "log_prob": [], "ratio_old_expert": [], "advantages_min": [],
                         "advantages_max": [], "ratio_old_expert_max": [], "ratio_old_expert_min": [],
-                        "ratio_current_old_max": [], "ratio_current_old_min": [], "mahalanobis_distance": [], "log_prob_expert": []}
+                        "ratio_current_old_max": [], "ratio_current_old_min": [], "mahalanobis_distance": [], "log_prob_expert": [],
+                        "clamp_fraction_above": [], "clamp_fraction_below": []}
 
         confidence_level = 0.95
 
@@ -568,6 +569,7 @@ class PPOExpert(OnPolicyAlgorithm):
             online_bs = max(0, self.batch_size - offline_bs)
             offline_data_buffer = self.expert_buffer.get(offline_bs)
             online_data_buffer = self.rollout_buffer.get(online_bs)
+            phi = 0.3
             # Do a complete pass on the rollout buffer
             while True:
                 try:
@@ -651,11 +653,9 @@ class PPOExpert(OnPolicyAlgorithm):
      
 
                 # #Clamp advantages
+                advantages = th.clamp(advantages, min=-10., max=10.)
                 if self.normalize_advantage:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-                #Clamp outlier advantages since it is normalized
-                advantages = th.clamp(advantages, min=-5., max=5.)
 
                 # advantages = th.clamp(advantages, min=-10., max=10.)
                 advantages_online = advantages[:len(advantages_online)]
@@ -704,7 +704,7 @@ class PPOExpert(OnPolicyAlgorithm):
                 # ratio_current_expert_offline = th.exp(
                 #     log_prob_offline - log_prob_expert)
                 # ratio_current_expert_offline = th.clamp(ratio_current_expert_offline, max=1.0, min=1e-3)
-
+                ratio_old_current_offline = 1.0 / ratio_current_old_offline
                 # clipped surrogate loss for online
 
                 policy_loss_1_online = advantages_online * ratio_current_old_online
@@ -714,13 +714,17 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 # clipped surrogate loss for offline
                 #normalizs the ratio_current_old_offline
-                policy_loss_1_offline = advantages_offline * ratio_current_old_offline
+                policy_loss_1_offline = advantages_offline * ratio_current_old_offline * ratio_old_expert_offline
                 # Old/expert ratio is already multiplied
                 # old/expert*current/old = current/expert (Expert sampled the data)
                 policy_loss_2_offline = advantages_offline * th.clamp(ratio_current_old_offline, 1 - clip_range,
-                                                                     1 + clip_range)
-                policy_loss_offline = -th.mean(th.min(policy_loss_1_offline, policy_loss_2_offline)* ratio_old_expert_offline * weight_offline)
+                                                                     1 + clip_range) * ratio_old_expert_offline
+                policy_loss_3_offline = advantages_offline * th.clamp(ratio_current_old_offline * ratio_old_expert_offline, 1 - phi, 1 + phi)
+                
+                policy_loss_min_1 = th.min(policy_loss_1_offline, policy_loss_2_offline)
+                policy_loss_offline = -th.mean(th.min(policy_loss_min_1, policy_loss_3_offline))
 
+            
                 if self.clip_range_vf is None:
                     # No clipping
                     values_pred_online = values_online
@@ -783,6 +787,12 @@ class PPOExpert(OnPolicyAlgorithm):
                 clip_fraction_offline = th.mean(
                     (th.abs(ratio_current_old_offline - 1) > clip_range).float()).item()
                 clamp_fraction_offline = th.mean((mahalanobis_distance > mahalanobis_threshold).float()).item()
+                clamp_fraction_below = th.mean(
+                    (ratio_current_old_offline * ratio_old_expert_offline < 1 - phi).float()
+                ).item()
+                clamp_fraction_above = th.mean(
+                    (ratio_current_old_offline * ratio_old_expert_offline > 1 + phi).float()
+                ).item()
 
                 # Log online data
                 logs_online["ratio_current_old"].append(ratio_current_old_online.mean().item())
@@ -807,7 +817,8 @@ class PPOExpert(OnPolicyAlgorithm):
                     logs_offline["entropy_loss"].append(entropy_loss_offline.item())
                     logs_offline["approx_kl_div"].append(approx_kl_div_offline)
                     logs_offline["clip_fraction"].append(clip_fraction_offline)
-                    logs_offline["clamp_fraction"].append(clamp_fraction_offline)
+                    logs_offline["clamp_fraction_below"].append(clamp_fraction_below)
+                    logs_offline["clamp_fraction_above"].append(clamp_fraction_above)
                     logs_offline["advantages"].append(advantages_offline.mean().item())
                     logs_offline["max_log_prob"].append(log_prob_offline.max().item())
                     logs_offline["min_log_prob"].append(log_prob_offline.min().item())
@@ -818,6 +829,7 @@ class PPOExpert(OnPolicyAlgorithm):
                     logs_offline["advantages_min"].append(advantages_offline.min().item())
                     logs_offline["advantages_max"].append(advantages_offline.max().item())
                     logs_offline["mahalanobis_distance"].append(mahalanobis_distance.mean().item())
+
                 # print(advantages_offline.min().item(), advantages_offline.max().item(), ratio_old_expert_offline.mean().item(),)
                 # Optimization step
                 self.policy.optimizer.zero_grad()
@@ -833,8 +845,9 @@ class PPOExpert(OnPolicyAlgorithm):
                 with th.no_grad():
                     # Direct subtract a constant from log_std, then clamp
                     if self.log_std_subtract > 0.0 and hasattr(self.policy, "log_std"):
-                        self.policy.log_std.add_(-self.log_std_subtract)
-                    self.policy.log_std.clamp_(min = -1.6)
+                        self.policy.log_std.add_(-self.log_std_subtract) #TODO: remove
+                    self.policy.log_std.clamp_(min=-1.6, max=0.72)  # or max=-0.5, etc.
+                    
 
         self._n_updates += 1
  # Logs

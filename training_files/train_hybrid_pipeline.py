@@ -257,6 +257,9 @@ def run_hybrid_ppo_training(
         "--device", args.device_ppo,
     ]
     
+    if args.run_name:
+        cmd.extend(["--run_name", args.run_name])
+    
     try:
         result = subprocess.run(cmd, check=True, cwd=Path(__file__).parent.parent)
         print(f"Hybrid PPO training completed successfully")
@@ -369,6 +372,8 @@ def main():
                         help="V-trace c_bar cap")
     parser.add_argument("--log_std_subtract", type=float, default=0.0,
                         help="Subtract from log_std after each update")
+    parser.add_argument("--run_name", type=str, default=None,
+                        help="Custom W&B run name for hybrid PPO (optional)")
     
     # Device
     parser.add_argument("--device_bc", type=str, default="auto",
@@ -404,26 +409,24 @@ def main():
     if existing_bc and args.skip_bc:
         bc_checkpoint, bc_val_loss, bc_epoch = existing_bc
         print(f"Skipping BC training; using existing checkpoint")
-    elif existing_bc and not args.force_bc_retrain:
-        response = input(
-            f"\nFound existing BC checkpoint: {existing_bc[0].name}\n"
-            f"val_loss: {existing_bc[1]:.6f}\n"
-            f"Retrain? [y/N]: "
-        )
-        if response.lower() == 'y':
-            bc_checkpoint = run_bc_training(args, hparam_keys["bc"])
-            if bc_checkpoint:
-                result = find_best_bc_checkpoint(args.dataset, args.env)
-                if result:
-                    bc_checkpoint, bc_val_loss, bc_epoch = result
-        else:
-            bc_checkpoint, bc_val_loss, bc_epoch = existing_bc
-            print(f"Using existing BC checkpoint")
-    else:
-        # Train new BC
+    elif existing_bc and args.force_bc_retrain:
+        # Force retrain BC even though checkpoint exists
+        print(f"Found existing BC checkpoint but force_bc_retrain is set")
         bc_checkpoint = run_bc_training(args, hparam_keys["bc"])
         if bc_checkpoint:
-            result = find_best_bc_checkpoint(args.dataset, args.env)
+            result = find_best_bc_checkpoint(args.dataset, args.env, args.names)
+            if result:
+                bc_checkpoint, bc_val_loss, bc_epoch = result
+    elif existing_bc:
+        # Use existing checkpoint (default behavior)
+        bc_checkpoint, bc_val_loss, bc_epoch = existing_bc
+        print(f"Using existing BC checkpoint: {bc_checkpoint.name}")
+    else:
+        # No existing checkpoint, train new BC
+        print(f"No existing BC checkpoint found, training new BC")
+        bc_checkpoint = run_bc_training(args, hparam_keys["bc"])
+        if bc_checkpoint:
+            result = find_best_bc_checkpoint(args.dataset, args.env, args.names)
             if result:
                 bc_checkpoint, bc_val_loss, bc_epoch = result
     

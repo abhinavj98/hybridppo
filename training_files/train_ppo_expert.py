@@ -76,10 +76,11 @@ if __name__ == "__main__":
     parser.add_argument('--log_std_subtract', type=float, default=0.0, help='Subtract this constant from log_std after each update')
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--run_name", type=str, default=None, help="Custom W&B run name (optional)")
 
     
     args = parser.parse_args()
-    dataset_name = f"{args.dataset}/{args.env}/{args.names}"
+    dataset_name = f"{args.dataset}/{args.env}/{''.join(args.names)}"
     # path = "C:/Users/abhin/OneDrive/Desktop/hybrid-ppo/"
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -105,9 +106,13 @@ if __name__ == "__main__":
     print(r)
     for i in range(args.num_runs):
         random_string = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+        if args.run_name:
+            run_name = args.run_name if args.num_runs == 1 else f"{args.run_name}_{i}"
+        else:
+            run_name = dataset_name+random_string+args.save_file+str(i)
         wandb_params = {'dataset_name': dataset_name,
                         # 'log_prob_expert': args.log_prob_expert,
-                        'name': dataset_name+random_string+args.save_file+str(i),
+                        'name': run_name,
                         'r': r,
                         }
         wandb_params.update(hparam)
@@ -157,7 +162,7 @@ if __name__ == "__main__":
             model.expert_policy = deepcopy(model.policy)
             #Set expert policy log std as constant
             model.policy.log_std.data.fill_(-1)
-            model.expert_policy.log_std.data.fill_(-0.7) #Keep slighly larger std for expert
+            model.expert_policy.log_std.data.fill_(-1) #Keep slighly larger std for expert
             print(f"Loaded BC policy weights from {args.bc_policy}")
         model.learn(total_timesteps=hparam['n_timesteps'], callback=eval_callback)
 
