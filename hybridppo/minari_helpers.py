@@ -71,7 +71,7 @@ class MinariTransitionDataset(Dataset):
         for ep_id, episode in enumerate(minari_dataset):
             if len(episode.actions) < 1:
                 continue
-            n_steps = len(episode.actions) - 1
+            n_steps = len(episode.actions)
             for step_id in range(n_steps):
                 self.index_map.append((ep_id, step_id))
             total_transitions += n_steps
@@ -96,22 +96,23 @@ class MinariTransitionDataset(Dataset):
             if len(episode.actions) < 1:
                 continue
 
-            # obs: 0 to T-2 (inclusive) -> slice [:-2]
-            # next_obs: 1 to T-1 (inclusive) -> slice [1:-1]
-            # actions/rewards/dones: 0 to T-2 -> slice [:-1]
+            # Correct indexing (observations has length T+1, everything else has length T):
+            # obs[i]: observations[i] for i in [0, T-1] -> observations[:-1]
+            # next_obs[i]: observations[i+1] for i in [0, T-1] -> observations[1:]
+            # actions/rewards/terminations/truncations: all length T, use all elements
             
-            obs_list.append(episode.observations[:-2])
-            next_obs_list.append(episode.observations[1:-1])
-            act_list.append(episode.actions[:-1])
-            rew_list.append(episode.rewards[:-1])
+            obs_list.append(episode.observations[:-1])
+            next_obs_list.append(episode.observations[1:])
+            act_list.append(episode.actions)
+            rew_list.append(episode.rewards)
             
-            terminations = episode.terminations[:-1]
-            truncations = episode.truncations[:-1]
+            terminations = episode.terminations
+            truncations = episode.truncations
             dones = np.logical_or(terminations, truncations).astype(np.float32)
             done_list.append(dones)
             
             # Metadata
-            n_steps = len(episode.actions) - 1
+            n_steps = len(episode.actions)
             ep_id_list.append(np.full(n_steps, ep_id, dtype=np.int64))
             step_id_list.append(np.arange(n_steps, dtype=np.int64))
 
@@ -174,7 +175,7 @@ class MinariTransitionDataset(Dataset):
         for ep_id, episode in enumerate(self.minari_dataset):
             if len(episode.actions) < 1:
                 continue
-            n_steps = len(episode.actions) - 1
+            n_steps = len(episode.actions)
             episode_to_indices[ep_id] = list(range(current_idx, current_idx + n_steps))
             current_idx += n_steps
         

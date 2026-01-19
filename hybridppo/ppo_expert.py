@@ -347,7 +347,8 @@ class PPOExpert(OnPolicyAlgorithm):
 
         self.log_prob_expert = log_prob_expert
         # Mixing (offline vs online) via minibatch split only
-        self.mix_ratio = float(max(0.0, min(1.0, mix_ratio)))
+        self.mix_ratio_initial = float(max(0.0, min(1.0, mix_ratio)))
+        self.mix_ratio = self.mix_ratio_initial
         # V-trace caps to be used by expert buffer advantage computation
         self.vtrace_rho_bar = float(rho_bar)
         self.vtrace_c_bar = float(c_bar)
@@ -410,8 +411,24 @@ class PPOExpert(OnPolicyAlgorithm):
         if hasattr(self.policy, "log_std"):
             with th.no_grad():
                 self._initial_log_std = self.policy.log_std.detach().clone()
+            
+            # Create separate optimizer for log_std with 10x lower learning rate
+            # First, exclude log_std from main optimizer
+            params_without_log_std = [p for name, p in self.policy.named_parameters() 
+                                      if not (name == 'log_std' or name.endswith('.log_std'))]
+            
+            # Recreate main optimizer without log_std
+            self.policy.optimizer = self.policy.optimizer_class(
+                params_without_log_std,
+                lr=self.lr_schedule(1),
+                **self.policy.optimizer_kwargs,
+            )
+            
+            # Create separate optimizer for log_std with 10x lower learning rate
+            self.log_std_optimizer = th.optim.Adam([self.policy.log_std], lr=self.lr_schedule(1.0) / 10.0)
         else:
             self._initial_log_std = None
+            self.log_std_optimizer = None
 
         # Reinitialize critic with orthogonal init and small gain on last layer
         if self.reinit_critic:
@@ -561,11 +578,14 @@ class PPOExpert(OnPolicyAlgorithm):
         mahalanobis_threshold = np.sqrt(chi2_value)  #Scaling factor of 2 to be more lenient
         print("Mahalanobis distance threshold set to: ", mahalanobis_threshold)
         # train for n_epochs epochs
+        # Compute current mix_ratio based on training progress (decay from initial to 0.0)
+        current_mix_ratio = self.mix_ratio_initial * self._current_progress_remaining
+        
         for epoch in range(self.n_epochs):
-            # print("Epoch ", epoch, "of ", self.n_epochs, "using mix ratio ", self.mix_ratio)
+            # print("Epoch ", epoch, "of ", self.n_epochs, "using mix ratio ", current_mix_ratio)
             approx_kl_divs = []
             # Split minibatch by configured mix ratio
-            offline_bs = max(0, int(self.batch_size * self.mix_ratio))
+            offline_bs = max(0, int(self.batch_size * current_mix_ratio))
             online_bs = max(0, self.batch_size - offline_bs)
             offline_data_buffer = self.expert_buffer.get(offline_bs)
             online_data_buffer = self.rollout_buffer.get(online_bs)
@@ -739,7 +759,6 @@ class PPOExpert(OnPolicyAlgorithm):
                         values_offline - offline_batch.old_values, -clip_range_vf, clip_range_vf
                     )
 
-                # New
                 clamped_returns_offline = offline_batch.returns#th.clamp(offline_batch.returns, min=-100, max=1000)
                 clamped_returns_online = online_batch.returns#th.clamp(online_batch.returns, min=-100, max=1000)
                 # Value loss using the TD(gae_lambda) target
@@ -748,9 +767,9 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 #Only increase value, do not decrease it. As in the future when support loses the values goes to 0
 
-                # value_diff = (clamped_returns_offline - values_pred_offline)
-                # value_loss_offline = th.mean(
-                #     ((value_diff ** 2))) * self.vf_coef
+                value_diff = (clamped_returns_offline - values_pred_offline)
+                value_loss_offline = th.mean(
+                    ((value_diff ** 2))) * self.vf_coef * 0.1
 
                 if entropy_online is None:
                     # Approximate entropy when no analytical form
@@ -765,7 +784,7 @@ class PPOExpert(OnPolicyAlgorithm):
                     entropy_loss_offline = -th.mean(entropy_offline) * self.ent_coef
 
                 online_loss = policy_loss_online + entropy_loss_online + value_loss_online
-                offline_loss = policy_loss_offline
+                offline_loss = policy_loss_offline + entropy_loss_offline + value_loss_offline
 
                 # Calculate approximate form of reverse KL Divergence for early stopping
                 # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
@@ -813,7 +832,7 @@ class PPOExpert(OnPolicyAlgorithm):
                     logs_offline["ratio_current_old_min"].append(ratio_current_old_offline.min().item())
                     logs_offline["log_prob_expert"].append(log_prob_expert.mean().item())
                     logs_offline["policy_loss"].append(policy_loss_offline.item())
-                    # logs_offline["value_loss"].append(value_loss_offline.item())
+                    logs_offline["value_loss"].append(value_loss_offline.item())
                     logs_offline["entropy_loss"].append(entropy_loss_offline.item())
                     logs_offline["approx_kl_div"].append(approx_kl_div_offline)
                     logs_offline["clip_fraction"].append(clip_fraction_offline)
@@ -833,15 +852,19 @@ class PPOExpert(OnPolicyAlgorithm):
                 # print(advantages_offline.min().item(), advantages_offline.max().item(), ratio_old_expert_offline.mean().item(),)
                 # Optimization step
                 self.policy.optimizer.zero_grad()
+                if self.log_std_optimizer is not None:
+                    self.log_std_optimizer.zero_grad()
                 loss_offline = offline_loss
                 loss_offline.backward()
                 # # Log std should only be updated for online data
-                self.policy.log_std.grad.zero_()
+                # self.policy.log_std.grad.zero_()
                 loss_online = online_loss
                 loss_online.backward()
                 # Clip grad norm
                 th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 self.policy.optimizer.step()
+                if self.log_std_optimizer is not None:
+                    self.log_std_optimizer.step()
                 with th.no_grad():
                     # Direct subtract a constant from log_std, then clamp
                     if self.log_std_subtract > 0.0 and hasattr(self.policy, "log_std"):
@@ -875,6 +898,9 @@ class PPOExpert(OnPolicyAlgorithm):
         # Log current gae_lambda value
         current_gae_lambda = self._gae_lambda_final + (self._gae_lambda_initial - self._gae_lambda_final) * self._current_progress_remaining
         self.logger.record("train/gae_lambda", current_gae_lambda)
+        # Log current mix_ratio (decays from initial to 0.0)
+        current_mix_ratio = self.mix_ratio_initial * self._current_progress_remaining
+        self.logger.record("train/mix_ratio", current_mix_ratio)
         self.log_from_rollout_buffer(self.expert_buffer, 'train_offline/')
         self.log_from_rollout_buffer(self.rollout_buffer, 'train_online/')
 
@@ -1134,6 +1160,7 @@ class PPOExpert(OnPolicyAlgorithm):
             "minari_transition_dataloader",
             "minari_transition_iterator", 
             "minari_transition_dataset",
+            "log_std_optimizer",
         ])
         return excluded_params
 
