@@ -769,7 +769,7 @@ class PPOExpert(OnPolicyAlgorithm):
 
                 value_diff = (clamped_returns_offline - values_pred_offline)
                 value_loss_offline = th.mean(
-                    ((value_diff ** 2))) * self.vf_coef * 0.1
+                    ((value_diff ** 2)*ratio_old_expert_offline)) * self.vf_coef * 0.1
 
                 if entropy_online is None:
                     # Approximate entropy when no analytical form
@@ -857,7 +857,7 @@ class PPOExpert(OnPolicyAlgorithm):
                 loss_offline = offline_loss
                 loss_offline.backward()
                 # # Log std should only be updated for online data
-                # self.policy.log_std.grad.zero_()
+                self.policy.log_std.grad.zero_()
                 loss_online = online_loss
                 loss_online.backward()
                 # Clip grad norm
