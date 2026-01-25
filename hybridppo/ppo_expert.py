@@ -107,8 +107,8 @@ class ExpertRolloutBuffer(RolloutBuffer):
                 next_values = self.values[step + 1]
 
             ratio = np.exp(self.log_probs[step] - self.log_prob_expert[step])  # ratio = p(a|s) / p(a|s, expert)
-            rho = np.clip(ratio, 0.5, rho_bar)
-            c = np.clip(ratio, 0.5, c_bar)
+            rho = np.clip(ratio, 0.001, rho_bar)
+            c = np.clip(ratio, 0.001, c_bar)
             # next_ratio = np.clip(next_ratio, 1e-5, 1)
             delta = (self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step])* rho
             # last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
@@ -388,7 +388,7 @@ class PPOExpert(OnPolicyAlgorithm):
             self.clip_range_vf = get_schedule_fn(self.clip_range_vf)
         
         # Store initial gae_lambda for scheduling (1.0 -> 0.95)
-        self._gae_lambda_initial = 1.0
+        self._gae_lambda_initial = 0.95
         self._gae_lambda_final = 0.95
         buffer_cls = DictRolloutBuffer if isinstance(self.observation_space, spaces.Dict) else RolloutBuffer
 
@@ -713,7 +713,7 @@ class PPOExpert(OnPolicyAlgorithm):
                 ratio_current_old_offline = th.clamp(ratio_current_old_offline, 0.0, 3.0)
                 
                 ratio_old_expert_offline = th.clamp(th.exp(
-                    th.clamp(offline_batch.old_log_prob - log_prob_expert, max = 50.0, min=-50)), max=1.0, min=0.01)
+                    th.clamp(offline_batch.old_log_prob - log_prob_expert, max = 50.0, min=-50)), max=2.0, min=0.001)
                 
 
 
@@ -765,12 +765,14 @@ class PPOExpert(OnPolicyAlgorithm):
                 value_loss_online = th.mean(
                     (((clamped_returns_online - values_pred_online) ** 2))) * self.vf_coef
 
-                #Only increase value, do not decrease it. As in the future when support loses the values goes to 0
+                value_diff = clamped_returns_offline - values_pred_offline
+                allow_up   = (value_diff > 0) & (ratio_old_expert_offline < 1 + phi)
+                allow_down = (value_diff < 0) & (ratio_old_expert_offline > 1 - phi)
 
-                value_diff = (clamped_returns_offline - values_pred_offline)
                 value_loss_offline = th.mean(
-                    ((value_diff ** 2)*ratio_old_expert_offline)) * self.vf_coef * 0.1
-
+                    ((value_diff ** 2)*ratio_old_expert_offline*(
+                        allow_up | allow_down).float())) * self.vf_coef * 0.1
+                
                 if entropy_online is None:
                     # Approximate entropy when no analytical form
                     entropy_loss_online = -th.mean(-log_prob_online + 1e-8) * self.ent_coef
