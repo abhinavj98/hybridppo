@@ -93,7 +93,7 @@ default:
   mix_ratio: 0.5
   rho_bar: 1.0
   c_bar: 0.99
-  log_std_subtract: 0.01
+  log_std_subtract: 0.00
 
 default_bc:
   normalize: true

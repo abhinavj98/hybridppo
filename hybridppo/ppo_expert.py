@@ -107,8 +107,8 @@ class ExpertRolloutBuffer(RolloutBuffer):
                 next_values = self.values[step + 1]
 
             ratio = np.exp(self.log_probs[step] - self.log_prob_expert[step])  # ratio = p(a|s) / p(a|s, expert)
-            rho = np.clip(ratio, 0.001, rho_bar)
-            c = np.clip(ratio, 0.001, c_bar)
+            rho = np.clip(ratio, 0.1, rho_bar)
+            c = np.clip(ratio, 0.1, c_bar)
             # next_ratio = np.clip(next_ratio, 1e-5, 1)
             delta = (self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step])* rho
             # last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
@@ -388,8 +388,8 @@ class PPOExpert(OnPolicyAlgorithm):
             self.clip_range_vf = get_schedule_fn(self.clip_range_vf)
         
         # Store initial gae_lambda for scheduling (1.0 -> 0.95)
-        self._gae_lambda_initial = 0.95
-        self._gae_lambda_final = 0.95
+        self._gae_lambda_initial = 1
+        self._gae_lambda_final = 1
         buffer_cls = DictRolloutBuffer if isinstance(self.observation_space, spaces.Dict) else RolloutBuffer
 
         self.expert_buffer = ExpertRolloutBuffer(
@@ -398,7 +398,7 @@ class PPOExpert(OnPolicyAlgorithm):
             self.action_space,
             device=self.device,
             gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
+            gae_lambda=self._gae_lambda_initial,  # Use full GAE for expert buffer
             n_envs=self.n_envs,
             rho_bar=self.vtrace_rho_bar,
             c_bar=self.vtrace_c_bar,
@@ -425,14 +425,12 @@ class PPOExpert(OnPolicyAlgorithm):
             )
             
             # Create separate optimizer for log_std with 10x lower learning rate
-            self.log_std_optimizer = th.optim.Adam([self.policy.log_std], lr=self.lr_schedule(1.0) / 10.0)
+            self.log_std_optimizer = th.optim.Adam([self.policy.log_std], lr=self.lr_schedule(1.0))
         else:
             self._initial_log_std = None
             self.log_std_optimizer = None
 
-        # Reinitialize critic with orthogonal init and small gain on last layer
-        if self.reinit_critic:
-            self._reinit_critic_ortho()
+     
 
     def _reinit_critic_ortho(self, hidden_gain: float = np.sqrt(2), output_gain: float = 0.01) -> None:
         """Reinitialize critic network with orthogonal initialization.
@@ -533,7 +531,7 @@ class PPOExpert(OnPolicyAlgorithm):
 
         # Update gae_lambda based on training progress (1.0 -> 0.95)
         current_gae_lambda = self._gae_lambda_final + (self._gae_lambda_initial - self._gae_lambda_final) * self._current_progress_remaining
-        # expert_buffer.gae_lambda = current_gae_lambda
+        expert_buffer.gae_lambda = current_gae_lambda
         
         expert_buffer.compute_returns_and_advantage(
             last_values=values.cpu().numpy(),
@@ -579,7 +577,7 @@ class PPOExpert(OnPolicyAlgorithm):
         print("Mahalanobis distance threshold set to: ", mahalanobis_threshold)
         # train for n_epochs epochs
         # Compute current mix_ratio based on training progress (decay from initial to 0.0)
-        current_mix_ratio = self.mix_ratio_initial * self._current_progress_remaining
+        current_mix_ratio = self.mix_ratio_initial #* self._current_progress_remaining
         
         for epoch in range(self.n_epochs):
             # print("Epoch ", epoch, "of ", self.n_epochs, "using mix ratio ", current_mix_ratio)
@@ -669,7 +667,12 @@ class PPOExpert(OnPolicyAlgorithm):
                 advantages_offline = offline_batch.advantages
 
                 # Concatenate advantages
-                advantages = th.cat((advantages_online, advantages_offline), 0)
+                if offline_bs == 0:
+                    advantages = advantages_online
+                elif online_bs == 0:
+                    advantages = advantages_offline
+                else:
+                    advantages = th.cat((advantages_online, advantages_offline), 0)
      
 
                 # #Clamp advantages
@@ -678,8 +681,13 @@ class PPOExpert(OnPolicyAlgorithm):
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
                 # advantages = th.clamp(advantages, min=-10., max=10.)
-                advantages_online = advantages[:len(advantages_online)]
-                advantages_offline = advantages[len(advantages_online):]
+                if offline_bs == 0:
+                    advantages_online = advantages
+                if online_bs == 0:
+                    advantages_offline = advantages
+                else:
+                    advantages_online = advantages[:online_bs]
+                    advantages_offline = advantages[online_bs:]
                 
                 # Scale advantages for rare events - Gradient at most will be A*k
                 # max_grad = 0.1 #Max norm is 0.5
@@ -766,12 +774,13 @@ class PPOExpert(OnPolicyAlgorithm):
                     (((clamped_returns_online - values_pred_online) ** 2))) * self.vf_coef
 
                 value_diff = clamped_returns_offline - values_pred_offline
-                allow_up   = (value_diff > 0) & (ratio_old_expert_offline < 1 + phi)
-                allow_down = (value_diff < 0) & (ratio_old_expert_offline > 1 - phi)
+                allow   = ((ratio_current_expert_offline > 1 - phi) & (ratio_current_expert_offline  < 1 + phi))
+                #Only allow to increas value when ratio is outside (1-phi, 1+phi)
+                # allow_down = (value_diff < 0) & (ratio_current_expert_offline > 1 + phi)
 
                 value_loss_offline = th.mean(
                     ((value_diff ** 2)*ratio_old_expert_offline*(
-                        allow_up | allow_down).float())) * self.vf_coef * 0.1
+                        allow).float())) * self.vf_coef *0.1
                 
                 if entropy_online is None:
                     # Approximate entropy when no analytical form
@@ -901,7 +910,7 @@ class PPOExpert(OnPolicyAlgorithm):
         current_gae_lambda = self._gae_lambda_final + (self._gae_lambda_initial - self._gae_lambda_final) * self._current_progress_remaining
         self.logger.record("train/gae_lambda", current_gae_lambda)
         # Log current mix_ratio (decays from initial to 0.0)
-        current_mix_ratio = self.mix_ratio_initial * self._current_progress_remaining
+        current_mix_ratio = self.mix_ratio_initial #* self._current_progress_remaining
         self.logger.record("train/mix_ratio", current_mix_ratio)
         self.log_from_rollout_buffer(self.expert_buffer, 'train_offline/')
         self.log_from_rollout_buffer(self.rollout_buffer, 'train_online/')

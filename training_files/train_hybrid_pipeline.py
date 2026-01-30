@@ -180,7 +180,7 @@ def run_value_finetuning(args, bc_checkpoint: Path, hparam_hybrid_key: str) -> O
     # But wait, train_value_only.py replaces .zip with _value_tuned.zip
     # So if input is "model.zip", output is "model_value_tuned.zip"
     
-    output_path = bc_checkpoint.parent / (bc_checkpoint.stem + "_value_tuned.zip")
+    output_path = bc_checkpoint.parent / (bc_checkpoint.stem + "_value_vtrace_tuned.zip")
     
     if output_path.exists():
         print(f"Found existing value-tuned checkpoint: {output_path.name}")
@@ -193,7 +193,7 @@ def run_value_finetuning(args, bc_checkpoint: Path, hparam_hybrid_key: str) -> O
 
     cmd = [
         "python",
-        "training_files/train_value_only.py",
+        "training_files/train_value_vtrace.py",
         "--dataset", args.dataset,
         "--minari_env", args.env,
         "--names", *args.names,
@@ -202,8 +202,8 @@ def run_value_finetuning(args, bc_checkpoint: Path, hparam_hybrid_key: str) -> O
         "--timesteps", str(args.warm_start_steps), # Use warm_start_steps for value tuning timesteps
         "--seed", str(args.seed),
         "--device", args.device_ppo,
-        "--n_envs", "8", # Default to 8 envs for faster rollout
-        "--learning_rate", "3e-4", # Use standard LR for value finetuning
+        "--n_envs", "8", # Default to 8 envs for faster processing
+        "--learning_rate", "3e-4",
     ]
     
     try:
@@ -255,6 +255,7 @@ def run_hybrid_ppo_training(
         "--log_std_subtract", str(args.log_std_subtract),
         "--seed", str(args.seed),
         "--device", args.device_ppo,
+        '--reinit_critic' if args.reinit_critic else '',
     ]
     
     if args.run_name:
@@ -340,7 +341,9 @@ def main():
                         help="Hparam key for BC training (e.g., Walker2d-v4-bc-large)")
     parser.add_argument("--hparam_hybrid", type=str, required=True,
                         help="Hparam key for hybrid PPO training (e.g., Walker2d-v4-hybrid)")
-    
+    parser.add_argument("--reinit_critic", action="store_true",
+                        help="Reinitialize critic with orthogonal init before training hybrid PPO")
+
     # Seed for reproducibility
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for BC and hybrid training")
@@ -356,7 +359,7 @@ def main():
                         help="BC batch size")
     parser.add_argument("--bc_coeff", type=float, default=0.005,
                         help="BC loss coefficient")
-    parser.add_argument("--warm_start_steps", type=int, default=500_000,
+    parser.add_argument("--warm_start_steps", type=int, default=1_000_000,
                         help="Value finetune timesteps (default: 100000)")
     parser.add_argument("--log_interval", type=int, default=10,
                         help="BC logging interval")

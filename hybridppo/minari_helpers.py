@@ -90,6 +90,9 @@ class MinariTransitionDataset(Dataset):
         done_list = []
         ep_id_list = []
         step_id_list = []
+        # Build episode -> global indices mapping while pre-loading
+        episode_to_indices = {}
+        current_idx = 0
 
         for ep_id, episode in enumerate(self.minari_dataset):
             # Skip empty episodes
@@ -115,6 +118,9 @@ class MinariTransitionDataset(Dataset):
             n_steps = len(episode.actions)
             ep_id_list.append(np.full(n_steps, ep_id, dtype=np.int64))
             step_id_list.append(np.arange(n_steps, dtype=np.int64))
+            # record global indices for this episode
+            episode_to_indices[ep_id] = list(range(current_idx, current_idx + n_steps))
+            current_idx += n_steps
 
         # Concatenate all into single tensors
         self.observations = torch.tensor(np.concatenate(obs_list), dtype=torch.float32)
@@ -124,6 +130,8 @@ class MinariTransitionDataset(Dataset):
         self.dones = torch.tensor(np.concatenate(done_list), dtype=torch.float32)
         self.episode_ids_tensor = torch.tensor(np.concatenate(ep_id_list), dtype=torch.int64)
         self.step_ids_tensor = torch.tensor(np.concatenate(step_id_list), dtype=torch.int64)
+        # store mapping for sampler use
+        self.episode_to_indices = episode_to_indices
         
         print(f"Loaded {len(self.observations)} transitions.")
 
@@ -169,16 +177,20 @@ class MinariTransitionDataset(Dataset):
     
     def get_episode_to_indices(self):
         """Build episode_to_indices mapping for sampler compatibility."""
+        # If preloaded, return the cached mapping built during _preload_data
+        if hasattr(self, "episode_to_indices"):
+            return self.episode_to_indices
+
+        # Otherwise build on demand (lazy mode)
         episode_to_indices = {}
         current_idx = 0
-        
         for ep_id, episode in enumerate(self.minari_dataset):
             if len(episode.actions) < 1:
                 continue
             n_steps = len(episode.actions)
             episode_to_indices[ep_id] = list(range(current_idx, current_idx + n_steps))
             current_idx += n_steps
-        
+
         return episode_to_indices
 
     def __len__(self):
@@ -246,14 +258,14 @@ class MultiEpisodeSequentialSampler(Sampler):
         env_its = {
             env_id: iter(self.ep_indices[self._sample_episode()])
             for env_id in range(self.n_envs)
-        }
+        } #Iterators through all dataset indices for a random episode
 
         while True:
             batch = []
             for env_id in range(self.n_envs):
                 ep_batch = []
                 while len(ep_batch) < self.batch_size:
-                    ep_iter = env_its[env_id]
+                    ep_iter = env_its[env_id] #Iterator through all dataset indices for a random episode
                     try:
                         ep_batch.append(next(ep_iter)) #For episode go through corresponding indices
                     except StopIteration:

@@ -77,8 +77,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--run_name", type=str, default=None, help="Custom W&B run name (optional)")
-
-    
+    parser.add_argument("--reinit_critic", action="store_true",
+                        help="Reinitialize critic with orthogonal init before training hybrid PPO")
     args = parser.parse_args()
     dataset_name = f"{args.dataset}/{args.env}/{''.join(args.names)}"
     # path = "C:/Users/abhin/OneDrive/Desktop/hybrid-ppo/"
@@ -120,6 +120,8 @@ if __name__ == "__main__":
         wandb_params['rho_bar'] = args.rho_bar
         wandb_params['c_bar'] = args.c_bar
         wandb_params['log_std_subtract'] = max(0.0, args.log_std_subtract)
+        wandb_params['seed'] = args.seed
+        wandb_params['reinit_critic'] = args.reinit_critic
         if args.bc_policy:
             wandb_params['bc_policy'] = args.bc_policy
 
@@ -151,7 +153,7 @@ if __name__ == "__main__":
                   policy_kwargs = policy_kwargs, tensorboard_log = './tb_test/hybrid/'+dataset_name+'/'+args.save_file+str(i), device = args.device,
                   minari_dataset = dataset,log_prob_expert=log_prob_expert,
                   mix_ratio=wandb_params['mix_ratio'], rho_bar=wandb_params['rho_bar'], c_bar=wandb_params['c_bar'],
-                  log_std_subtract=wandb_params['log_std_subtract'],
+                  log_std_subtract=wandb_params['log_std_subtract'], reinit_critic=args.reinit_critic
                           )
         print(" Running on device", model.device)
         if args.bc_policy:
@@ -161,9 +163,12 @@ if __name__ == "__main__":
             model.policy.load_state_dict(bc_policy.state_dict())
             model.expert_policy = deepcopy(model.policy)
             #Set expert policy log std as constant
-            model.policy.log_std.data.fill_(-0.5)
-            model.expert_policy.log_std.data.fill_(-0.5) #Keep slighly lower std for expert
+            model.policy.log_std.data.fill_(-0.6)
+            model.expert_policy.log_std.data.fill_(-0.6) #Keep slighly lower std for expert
             print(f"Loaded BC policy weights from {args.bc_policy}")
+            if model.reinit_critic:
+                model._reinit_critic_ortho()
+                print("Reinitialized critic after loading BC policy.")
         model.learn(total_timesteps=hparam['n_timesteps'], callback=eval_callback)
 
         # Evaluate model

@@ -3,16 +3,16 @@ import torch
 from hybridppo.minari_helpers import MinariTransitionDataset, MultiEpisodeSequentialSampler, collate_env_batch
 
 class DummyEpisode:
-    def __init__(self, T):
-        self.observations = [torch.ones(3)*i for i in range(T+1)]
+    def __init__(self, T, id=0):
+        self.observations = [torch.ones(3) * (id * 1000 + i) for i in range(T + 1)]
         self.actions = [torch.zeros(2) for _ in range(T)]
-        self.rewards = [1.0]*T
-        self.terminations = [False]*(T-1) + [True]
-        self.truncations = [False]*T
+        self.rewards = [1.0] * T
+        self.terminations = [False] * (T - 1) + [True]
+        self.truncations = [False] * T
 
 class DummyMinariDataset:
-    def __init__(self, n_eps, T):
-        self.episodes = [DummyEpisode(T) for _ in range(n_eps)]
+    def __init__(self, n_eps=4, T=10):
+        self.episodes = [DummyEpisode(T, id=i) for i in range(n_eps)]
 
     def __getitem__(self, idx):
         return self.episodes[idx]
@@ -24,7 +24,7 @@ class TestMinariTransition(unittest.TestCase):
     def test_dataset_indexing(self):
         dataset = DummyMinariDataset(5, 10)
         trans_dataset = MinariTransitionDataset(dataset)
-        self.assertEqual(len(trans_dataset), 5 * 9)  # (T - 1) per episode
+        self.assertEqual(len(trans_dataset), 5 * 10)
         sample = trans_dataset[0]
         self.assertIn("observations", sample)
         self.assertEqual(sample["observations"].shape, torch.Size([3]))
@@ -46,15 +46,15 @@ class TestMinariTransition(unittest.TestCase):
         out = collate_env_batch(batch, 2, 4)
         self.assertEqual(out["observations"].shape, torch.Size([4, 2, 3]))
 
-    from hybridppo.minari_helpers import MinariTransitionDataset, MultiEpisodeSequentialSampler, collate_env_batch
-    from torch.utils.data import DataLoader
+from hybridppo.minari_helpers import MinariTransitionDataset, MultiEpisodeSequentialSampler, collate_env_batch
+from torch.utils.data import DataLoader
 
 class TestMinariOfflineRL(unittest.TestCase):
 
     def test_transition_dataset_indexing(self):
-        dummy_data = DummyMinariDataset()
+        dummy_data = DummyMinariDataset(5, 10)
         dataset = MinariTransitionDataset(dummy_data)
-        expected_len = 4 * (20)  # 4 episodes × (T-1) steps
+        expected_len = 5 * 10  # 5 episodes × 10 steps
         self.assertEqual(len(dataset), expected_len)
 
         sample = dataset[0]
@@ -62,7 +62,7 @@ class TestMinariOfflineRL(unittest.TestCase):
         self.assertEqual(sample["observations"].shape, torch.Size([3]))
 
     def test_sampler_ordering_and_collation(self):
-        dummy_data = DummyMinariDataset()
+        dummy_data = DummyMinariDataset(5, 10)
         dataset = MinariTransitionDataset(dummy_data)
         sampler = MultiEpisodeSequentialSampler(dataset, n_envs=2, batch_size=5, seed=42)
         dataloader = DataLoader(
@@ -85,7 +85,7 @@ class TestMinariOfflineRL(unittest.TestCase):
             self.assertTrue(all(ep == episode_ids[0] for ep in episode_ids), "Mixed episode IDs in env")
 
     def test_dataloader_wraparound(self):
-        dummy_data = DummyMinariDataset()
+        dummy_data = DummyMinariDataset(3, 15)
         dataset = MinariTransitionDataset(dummy_data)
         sampler = MultiEpisodeSequentialSampler(dataset, n_envs=2, batch_size=20, seed=1)
         dataloader = DataLoader(
@@ -118,7 +118,7 @@ class TestMinariOfflineRL(unittest.TestCase):
 #         return len(self.episodes)
 
 if __name__ == "__main__":
-    unittest.main()
+    # unittest.main()
 
     import torch
     from torch.utils.data import DataLoader
