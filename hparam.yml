@@ -74,6 +74,22 @@ InvertedDoublePendulum-v2:
   vf_coef: 0.695929
   log_std_init: 0
 
+Walker2d-v4-rlpd:
+  normalize: true
+  n_envs: 1
+  policy: 'MlpPolicy'
+  n_timesteps: !!float 1e6
+  batch_size: 256
+  learning_rate: 3.0e-4
+  buffer_size: 1000000
+  learning_starts: 5000
+  tau: 0.005
+  gamma: 0.99
+  train_freq: 1
+  gradient_steps: 1
+  ent_coef: "auto"
+  mix_ratio: 0.5
+
 default:
   normalize: true
   n_envs: 16
