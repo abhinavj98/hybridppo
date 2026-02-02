@@ -51,6 +51,7 @@ class ExpertRolloutBufferSamples(NamedTuple):
     advantages: th.Tensor
     returns: th.Tensor
     log_prob_expert: th.Tensor  # New field for expert log probabilities
+    offline_values: th.Tensor  # New field for offline values
 
 class ExpertRolloutBuffer(RolloutBuffer):
     def __init__(self, *args, rho_bar: float = 1.5, c_bar: float = 1.0, **kwargs):
@@ -62,19 +63,22 @@ class ExpertRolloutBuffer(RolloutBuffer):
     def reset(self) -> None:
         super().reset()
         self.log_prob_expert = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        self.offline_values = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
 
     def add(
-            self,
-            obs: np.ndarray,
-            action: np.ndarray,
-            reward: np.ndarray,
-            episode_start: np.ndarray,
-            value: th.Tensor,
-            log_prob: th.Tensor,
-            log_prob_expert: np.ndarray,  # New arg
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        reward: np.ndarray,
+        episode_start: np.ndarray,
+        value: th.Tensor,
+        log_prob: th.Tensor,
+        log_prob_expert: np.ndarray,
+        offline_values: np.ndarray = None,
     ) -> None:
         super().add(obs, action, reward, episode_start, value, log_prob)
         self.log_prob_expert[self.pos-1] = log_prob_expert.clone().cpu().numpy()
+        self.offline_values[self.pos-1] = offline_values.clone().cpu().numpy() 
     def compute_returns_and_advantage(self, last_values: th.Tensor, dones: np.ndarray) -> None:
         """
         Post-processing step: compute the lambda-return (TD(lambda) estimate)
@@ -104,18 +108,22 @@ class ExpertRolloutBuffer(RolloutBuffer):
                 next_values = last_values
             else:
                 next_non_terminal = 1.0 - self.episode_starts[step + 1]
-                next_values = self.values[step + 1]
+                next_values = self.offline_values[step + 1]
 
             ratio = np.exp(self.log_probs[step] - self.log_prob_expert[step])  # ratio = p(a|s) / p(a|s, expert)
-            rho = np.clip(ratio, 0.1, rho_bar)
-            c = np.clip(ratio, 0.1, c_bar)
-            # next_ratio = np.clip(next_ratio, 1e-5, 1)
-            delta = (self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step])* rho
+            rho = np.clip(ratio, 0.5, rho_bar)
+            c = np.clip(ratio, 0.5, c_bar)
+
+            # rho = c = 1.c
+            # self.gamma = 0.5
+            #Low lambda for stability. What it does is have shorter trace length. Is this true? Answer: Yes.
+            # Explanation: With low lambda, the weight on future advantages decreases rapidly, effectively shortening the trace length.
+            delta = (self.rewards[step]+ self.gamma * next_values * next_non_terminal - self.offline_values[step])* rho
             # last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
             #For retrace
-            last_gae_lam = delta + self.gamma* self.gae_lambda*next_non_terminal * last_gae_lam*c
-            self.advantages[step] = last_gae_lam
-        self.returns = self.advantages + self.values
+            last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam * c
+            self.advantages[step] = last_gae_lam 
+        self.returns = self.advantages + self.offline_values
 
     def get(self, batch_size: Optional[int] = None) -> Generator[RolloutBufferSamples, None, None]:
         assert self.full, ""
@@ -130,6 +138,7 @@ class ExpertRolloutBuffer(RolloutBuffer):
                 "advantages",
                 "returns",
                 "log_prob_expert",
+                "offline_values",
             ]
 
             for tensor in _tensor_names:
@@ -158,6 +167,7 @@ class ExpertRolloutBuffer(RolloutBuffer):
             self.advantages[batch_inds].flatten(),
             self.returns[batch_inds].flatten(),
             self.log_prob_expert[batch_inds].flatten(),  # New
+            self.offline_values[batch_inds].flatten(),  # New
         )
         return ExpertRolloutBufferSamples(*tuple(map(self.to_torch, data)))
 
@@ -388,8 +398,8 @@ class PPOExpert(OnPolicyAlgorithm):
             self.clip_range_vf = get_schedule_fn(self.clip_range_vf)
         
         # Store initial gae_lambda for scheduling (1.0 -> 0.95)
-        self._gae_lambda_initial = 1
-        self._gae_lambda_final = 1
+        self._gae_lambda_initial = 1.0
+        self._gae_lambda_final = 0.95
         buffer_cls = DictRolloutBuffer if isinstance(self.observation_space, spaces.Dict) else RolloutBuffer
 
         self.expert_buffer = ExpertRolloutBuffer(
@@ -455,7 +465,19 @@ class PPOExpert(OnPolicyAlgorithm):
                     th.nn.init.orthogonal_(module.weight, gain=output_gain)
                     if module.bias is not None:
                         th.nn.init.constant_(module.bias, 0.0)
-        
+        if hasattr(self.expert_policy, "mlp_extractor") and hasattr(self.expert_policy.mlp_extractor, "value_net"):
+            for module in self.expert_policy.mlp_extractor.value_net.modules():
+                if isinstance(module, th.nn.Linear):
+                    th.nn.init.orthogonal_(module.weight, gain=hidden_gain)
+                    if module.bias is not None:
+                        th.nn.init.constant_(module.bias, 0.0)
+
+        if hasattr(self.expert_policy, "value_net"):
+            for module in self.expert_policy.value_net.modules():
+                if isinstance(module, th.nn.Linear):
+                    th.nn.init.orthogonal_(module.weight, gain=output_gain)
+                    if module.bias is not None:
+                        th.nn.init.constant_(module.bias, 0.0)
         if self.verbose > 0:
             print("INFO: Reinitialized critic with orthogonal init (hidden_gain={}, output_gain={})".format(
                 hidden_gain, output_gain))
@@ -492,6 +514,7 @@ class PPOExpert(OnPolicyAlgorithm):
             batch = next(self.minari_transition_iterator) #Tensor
 
 
+
         for i in range(batch['observations'].shape[0]):  # Loop over timesteps
             last_obs = batch['observations'][i]
             rewards = batch['rewards'][i]
@@ -511,8 +534,10 @@ class PPOExpert(OnPolicyAlgorithm):
                 obs_tensor = last_obs.to(self.device)
                 act_tensor = actions.to(self.device)
                 _, values, log_probs = self.policy.forward_expert(obs_tensor, act_tensor)
-                _, _, expert_log_probs = self.expert_policy.forward_expert(obs_tensor, act_tensor)
+                _, values_frozen, expert_log_probs = self.expert_policy.forward_expert(obs_tensor, act_tensor)
 
+
+            
             expert_buffer.add(
                 last_obs.cpu().numpy(),
                 act_tensor.cpu().numpy(),
@@ -521,8 +546,9 @@ class PPOExpert(OnPolicyAlgorithm):
                 values.squeeze(-1),
                 log_probs,
                 expert_log_probs,
+                values_frozen.squeeze(-1)  # offline_values
             )
-
+           
             self._expert_last_episode_starts = dones_np
 
         with th.no_grad():
@@ -587,7 +613,7 @@ class PPOExpert(OnPolicyAlgorithm):
             online_bs = max(0, self.batch_size - offline_bs)
             offline_data_buffer = self.expert_buffer.get(offline_bs)
             online_data_buffer = self.rollout_buffer.get(online_bs)
-            phi = 0.3
+            phi = 0.1
             # Do a complete pass on the rollout buffer
             while True:
                 try:
@@ -676,7 +702,7 @@ class PPOExpert(OnPolicyAlgorithm):
      
 
                 # #Clamp advantages
-                advantages = th.clamp(advantages, min=-10., max=10.)
+                # advantages = th.clamp(advantages, min=-10., max=10.)
                 if self.normalize_advantage:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -764,23 +790,24 @@ class PPOExpert(OnPolicyAlgorithm):
                         values_online - online_batch.old_values, -clip_range_vf, clip_range_vf
                     )
                     values_pred_offline = offline_batch.old_values + th.clamp(
-                        values_offline - offline_batch.old_values, -clip_range_vf, clip_range_vf
+                        values_offline - offline_batch.old_values, -10, 10
                     )
 
                 clamped_returns_offline = offline_batch.returns#th.clamp(offline_batch.returns, min=-100, max=1000)
                 clamped_returns_online = online_batch.returns#th.clamp(online_batch.returns, min=-100, max=1000)
                 # Value loss using the TD(gae_lambda) target
                 value_loss_online = th.mean(
-                    (((clamped_returns_online - values_pred_online) ** 2))) * self.vf_coef
+                    (((clamped_returns_online - values_pred_online) ** 2))) * self.vf_coef 
 
                 value_diff = clamped_returns_offline - values_pred_offline
-                allow   = ((ratio_current_expert_offline > 1 - phi) & (ratio_current_expert_offline  < 1 + phi))
+                allow   =  1#(ratio_current_expert_offline  > 1 - phi)
+
+                # allow = value_diff > 0
                 #Only allow to increas value when ratio is outside (1-phi, 1+phi)
                 # allow_down = (value_diff < 0) & (ratio_current_expert_offline > 1 + phi)
 
                 value_loss_offline = th.mean(
-                    ((value_diff ** 2)*ratio_old_expert_offline*(
-                        allow).float())) * self.vf_coef *0.1
+                    (value_diff ** 2) *allow*ratio_old_expert_offline * self.vf_coef)*0.1
                 
                 if entropy_online is None:
                     # Approximate entropy when no analytical form
@@ -919,7 +946,10 @@ class PPOExpert(OnPolicyAlgorithm):
             self.logger.record("train/clip_range_vf", clip_range_vf)
 
     def log_from_rollout_buffer(self, buffer, prefix):
-        self.logger.record(prefix + "returns", np.mean(buffer.returns))
+        self.logger.record(prefix + "returns_mean", np.mean(buffer.returns))
+        self.logger.record(prefix + "returns_std", np.std(buffer.returns))
+        self.logger.record(prefix + "returns_max", np.max(buffer.returns))
+        self.logger.record(prefix + "returns_min", np.min(buffer.returns))
         self.logger.record(prefix + "values", np.mean(buffer.values))
         self.logger.record(prefix + "advantages_buffer", np.mean(buffer.advantages))
         self.logger.record(prefix + "explained_variance",
@@ -1131,23 +1161,10 @@ class PPOExpert(OnPolicyAlgorithm):
         Update policy using the currently gathered rollout buffer.
         """
         # Switch to train mode (this affects batch norm / dropout)
-
+        self.policy.set_training_mode(True)
         # Update optimizer learning rate
         self._update_learning_rate(self.policy.optimizer)
-        # Optionally update log_std linearly from initial -> final with training progress
-        if self.std_decay and hasattr(self.policy, "log_std") and self._initial_log_std is not None:
-            # progress_remaining: 1.0 at start -> 0.0 at end
-            progress = float(self._current_progress_remaining)
-            init_log_std = self._initial_log_std
-            # If final not provided, default to current clamp minimum (-1.6) to stay consistent
-            target_final = self.log_std_final if self.log_std_final is not None else -1.6
-            if not th.is_tensor(target_final):
-                target_final = th.tensor(target_final, dtype=init_log_std.dtype, device=init_log_std.device)
-            # Broadcast to parameter shape
-            target_final = target_final.expand_as(init_log_std)
-            new_log_std = target_final + (init_log_std - target_final) * progress
-            with th.no_grad():
-                self.policy.log_std.copy_(new_log_std)
+        
         # Compute current clip range
         clip_range = self.clip_range(self._current_progress_remaining)  # type: ignore[operator]
         # Optional: clip range for the value function
@@ -1208,8 +1225,13 @@ class PPOExpert(OnPolicyAlgorithm):
 
             if continue_training is False:
                 break
-
+            if iteration % 5 == 0:
+                #Copy expert policy critic to current policy critic
+                self.expert_policy.value_net.load_state_dict(self.policy.value_net.state_dict())
+                # self.policy.value_net.load_state_dict(self.expert_policy.value_net.state_dict())
             iteration += 1
+           
+
             self._update_current_progress_remaining(self.num_timesteps, total_timesteps)
 
 
