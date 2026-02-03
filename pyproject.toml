@@ -3,7 +3,7 @@ name = "hybridppo"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
     "gymnasium[mujoco,other]>=1.2.3",
     "minari[hdf5,hf]>=0.5.3",

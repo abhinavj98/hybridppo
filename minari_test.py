@@ -1,5 +1,6 @@
 import unittest
 import torch
+from torch.utils.data import DataLoader
 from hybridppo.minari_helpers import MinariTransitionDataset, MultiEpisodeSequentialSampler, collate_env_batch
 
 class DummyEpisode:
@@ -46,13 +47,10 @@ class TestMinariTransition(unittest.TestCase):
         out = collate_env_batch(batch, 2, 4)
         self.assertEqual(out["observations"].shape, torch.Size([4, 2, 3]))
 
-    from hybridppo.minari_helpers import MinariTransitionDataset, MultiEpisodeSequentialSampler, collate_env_batch
-    from torch.utils.data import DataLoader
-
 class TestMinariOfflineRL(unittest.TestCase):
 
     def test_transition_dataset_indexing(self):
-        dummy_data = DummyMinariDataset()
+        dummy_data = DummyMinariDataset(n_eps=4, T=21)
         dataset = MinariTransitionDataset(dummy_data)
         expected_len = 4 * (20)  # 4 episodes × (T-1) steps
         self.assertEqual(len(dataset), expected_len)
@@ -62,7 +60,7 @@ class TestMinariOfflineRL(unittest.TestCase):
         self.assertEqual(sample["observations"].shape, torch.Size([3]))
 
     def test_sampler_ordering_and_collation(self):
-        dummy_data = DummyMinariDataset()
+        dummy_data = DummyMinariDataset(n_eps=4, T=21)
         dataset = MinariTransitionDataset(dummy_data)
         sampler = MultiEpisodeSequentialSampler(dataset, n_envs=2, batch_size=5, seed=42)
         dataloader = DataLoader(
@@ -85,7 +83,7 @@ class TestMinariOfflineRL(unittest.TestCase):
             self.assertTrue(all(ep == episode_ids[0] for ep in episode_ids), "Mixed episode IDs in env")
 
     def test_dataloader_wraparound(self):
-        dummy_data = DummyMinariDataset()
+        dummy_data = DummyMinariDataset(n_eps=4, T=21)
         dataset = MinariTransitionDataset(dummy_data)
         sampler = MultiEpisodeSequentialSampler(dataset, n_envs=2, batch_size=20, seed=1)
         dataloader = DataLoader(

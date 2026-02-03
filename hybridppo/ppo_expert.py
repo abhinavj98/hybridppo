@@ -554,7 +554,12 @@ class PPOExpert(OnPolicyAlgorithm):
         confidence_level = 0.95
 
         # Calculate Chi-Square value for 95.7% confidence and n dimensions
-        chi2_value = chi2.ppf(confidence_level, df=self.policy.log_std.shape[-1])  # action_dim
+        n_dims = self.policy.log_std.shape[-1]  # action_dim
+        chi2_value = chi2.ppf(confidence_level, df=n_dims)
+
+        # Pre-compute constant term for Mahalanobis distance
+        # 0.5 * n * log(2*pi)
+        log_2pi_term = 0.5 * n_dims * th.log(th.tensor(2 * th.pi, device=self.device))
 
         # Mahalanobis distance threshold (square root of chi2). Distance from Gaussian distribution follows chi2 distribution
         mahalanobis_threshold = np.sqrt(chi2_value)  #Scaling factor of 2 to be more lenient
@@ -613,13 +618,11 @@ class PPOExpert(OnPolicyAlgorithm):
                     # mahalanobis_distance = th.sqrt(mahalanobis_distance_squared)
                     #Calculate mahalanobis distance using log_std and log_prob
 
-                    n = self.policy.log_std.shape[-1]  # action_dim
-
                     # If std is same across dimensions:
                     log_std_sum = torch.sum(self.policy.log_std, dim=-1)  # sum over dimensions
 
                     # Compute Mahalanobis squared
-                    D_M_squared = -2 * (log_prob_offline + 0.5 * n * th.log(th.tensor(2*th.pi)) + log_std_sum)
+                    D_M_squared = -2 * (log_prob_offline + log_2pi_term + log_std_sum)
 
                     # Mahalanobis distance
                     mahalanobis_distance = torch.sqrt(D_M_squared + 1e-8)  # small epsilon for numerical stability
