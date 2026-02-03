@@ -227,7 +227,7 @@ class MultiEpisodeSequentialSampler(Sampler):
     flattened as [e0t0, e0t1, e0t2, ..., e0tn, e1t0, e1t1, ..., e(num_envs-1)t(batch_size-1)]
     so the list size is num_envs * batch_size. Use collate_fn to reorder"""
     def __init__(self, dataset, n_envs, batch_size, seed=None):
-        super().__init__(dataset)
+        super().__init__()
         self.dataset = dataset
         self.n_envs = n_envs
         self.batch_size = batch_size
