@@ -514,8 +514,14 @@ class PPOExpert(OnPolicyAlgorithm):
                     if module.bias is not None:
                         th.nn.init.constant_(module.bias, 0.0)
 
-        if hasattr(self.policy, "q_net"):
-            for module in self.policy.q_net.modules():
+        if hasattr(self.policy, "q_val_net"):
+            for module in self.policy.q_val_net.modules():
+                if isinstance(module, th.nn.Linear):
+                    th.nn.init.orthogonal_(module.weight, gain=output_gain)
+                    if module.bias is not None:
+                        th.nn.init.constant_(module.bias, 0.0)
+        if hasattr(self.policy, "q_adv_net"):
+            for module in self.policy.q_adv_net.modules():
                 if isinstance(module, th.nn.Linear):
                     th.nn.init.orthogonal_(module.weight, gain=output_gain)
                     if module.bias is not None:
@@ -535,8 +541,14 @@ class PPOExpert(OnPolicyAlgorithm):
                     if module.bias is not None:
                         th.nn.init.constant_(module.bias, 0.0)
 
-        if hasattr(self.expert_policy, "q_net"):
-            for module in self.expert_policy.q_net.modules():
+        if hasattr(self.expert_policy, "q_val_net"):
+            for module in self.expert_policy.q_val_net.modules():
+                if isinstance(module, th.nn.Linear):
+                    th.nn.init.orthogonal_(module.weight, gain=output_gain)
+                    if module.bias is not None:
+                        th.nn.init.constant_(module.bias, 0.0)
+        if hasattr(self.expert_policy, "q_adv_net"):
+            for module in self.expert_policy.q_adv_net.modules():
                 if isinstance(module, th.nn.Linear):
                     th.nn.init.orthogonal_(module.weight, gain=output_gain)
                     if module.bias is not None:
@@ -1345,8 +1357,10 @@ class PPOExpert(OnPolicyAlgorithm):
             if iteration % 5 == 0:
                 #Copy expert policy critic to current policy critic
                 self.expert_policy.value_net.load_state_dict(self.policy.value_net.state_dict())
-                if hasattr(self.policy, "q_net") and hasattr(self.expert_policy, "q_net"):
-                    self.expert_policy.q_net.load_state_dict(self.policy.q_net.state_dict())
+                if hasattr(self.policy, "q_val_net") and hasattr(self.expert_policy, "q_val_net"):
+                    self.expert_policy.q_val_net.load_state_dict(self.policy.q_val_net.state_dict())
+                if hasattr(self.policy, "q_adv_net") and hasattr(self.expert_policy, "q_adv_net"):
+                    self.expert_policy.q_adv_net.load_state_dict(self.policy.q_adv_net.state_dict())
                 # self.policy.value_net.load_state_dict(self.expert_policy.value_net.state_dict())
             iteration += 1
            
