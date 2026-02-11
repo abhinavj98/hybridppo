@@ -3,8 +3,24 @@
 from stable_baselines3.common.policies import ActorCriticCnnPolicy, ActorCriticPolicy, MultiInputActorCriticPolicy
 from typing import Dict, List, Tuple, Type, Union
 import torch as th
+import numpy as np
+from gymnasium import spaces
 from stable_baselines3.common.utils import get_device
 from torch import nn
+
+class QNetwork(nn.Module):
+    def __init__(self, input_dim, output_dim=1, hidden_dim=256):
+        super(QNetwork, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+    def forward(self, x):
+        return self.net(x)
+
 # class MultiInputPolicyExpert(MultiInputActorCriticPolicy):
 #     def __init__(self, *args, **kwargs):
 #         super(MultiInputPolicyExpert, self).__init__(*args, **kwargs)
@@ -37,6 +53,32 @@ import copy
 class MlpPolicyExpert(ActorCriticPolicy):
     def __init__(self, *args, **kwargs):
         super(MlpPolicyExpert, self).__init__(*args, **kwargs)
+
+        # Initialize Q-Network
+        input_dim = self.features_dim
+
+        if isinstance(self.action_space, spaces.Box):
+            input_dim += int(np.prod(self.action_space.shape))
+            self.q_net = QNetwork(input_dim, output_dim=1)
+        elif isinstance(self.action_space, spaces.Discrete):
+            self.q_net = QNetwork(input_dim, output_dim=self.action_space.n)
+        else:
+             # Fallback or error, for now assume compatible with simple Q-learning if possible
+             pass
+
+    def forward_q(self, obs, action):
+        features = self.extract_features(obs)
+        if isinstance(self.action_space, spaces.Box):
+            if len(action.shape) > 2:
+                action = action.reshape(action.shape[0], -1)
+            q_input = th.cat([features, action], dim=-1)
+            return self.q_net(q_input)
+        elif isinstance(self.action_space, spaces.Discrete):
+             q_values = self.q_net(features)
+             # gather
+             return q_values.gather(1, action.long().view(-1, 1))
+        else:
+             raise NotImplementedError("Unsupported action space for Q-learning")
 
     class MlpExtractor(nn.Module):
         """

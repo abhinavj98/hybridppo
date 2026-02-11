@@ -85,6 +85,7 @@ class MinariTransitionDataset(Dataset):
     def _preload_data(self):
         obs_list = []
         act_list = []
+        next_act_list = []  # List for next actions
         rew_list = []
         next_obs_list = []
         done_list = []
@@ -107,6 +108,13 @@ class MinariTransitionDataset(Dataset):
             obs_list.append(episode.observations[:-1])
             next_obs_list.append(episode.observations[1:])
             act_list.append(episode.actions)
+
+            # Compute next_actions: shift actions by 1 and pad with zeros for the last step
+            next_actions = np.zeros_like(episode.actions)
+            if len(episode.actions) > 1:
+                next_actions[:-1] = episode.actions[1:]
+            next_act_list.append(next_actions)
+
             rew_list.append(episode.rewards)
             
             terminations = episode.terminations
@@ -126,6 +134,7 @@ class MinariTransitionDataset(Dataset):
         self.observations = torch.tensor(np.concatenate(obs_list), dtype=torch.float32)
         self.next_observations = torch.tensor(np.concatenate(next_obs_list), dtype=torch.float32)
         self.actions = torch.tensor(np.concatenate(act_list), dtype=torch.float32)
+        self.next_actions = torch.tensor(np.concatenate(next_act_list), dtype=torch.float32)
         self.rewards = torch.tensor(np.concatenate(rew_list), dtype=torch.float32)
         self.dones = torch.tensor(np.concatenate(done_list), dtype=torch.float32)
         self.episode_ids_tensor = torch.tensor(np.concatenate(ep_id_list), dtype=torch.int64)
@@ -145,6 +154,7 @@ class MinariTransitionDataset(Dataset):
             return {
                 'observations': self.observations[idx],
                 'actions': self.actions[idx],
+                'next_actions': self.next_actions[idx],
                 'rewards': self.rewards[idx],
                 'next_observations': self.next_observations[idx],
                 'dones': self.dones[idx],
@@ -159,6 +169,13 @@ class MinariTransitionDataset(Dataset):
             obs = episode.observations[step_id]
             next_obs = episode.observations[step_id + 1]
             action = episode.actions[step_id]
+
+            # Compute next_action lazily
+            if step_id < len(episode.actions) - 1:
+                next_action = episode.actions[step_id + 1]
+            else:
+                next_action = np.zeros_like(action)
+
             reward = episode.rewards[step_id]
             
             termination = episode.terminations[step_id]
@@ -168,6 +185,7 @@ class MinariTransitionDataset(Dataset):
             return {
                 'observations': torch.tensor(obs, dtype=torch.float32),
                 'actions': torch.tensor(action, dtype=torch.float32),
+                'next_actions': torch.tensor(next_action, dtype=torch.float32),
                 'rewards': torch.tensor(reward, dtype=torch.float32),
                 'next_observations': torch.tensor(next_obs, dtype=torch.float32),
                 'dones': torch.tensor(done, dtype=torch.float32),
@@ -192,46 +210,6 @@ class MinariTransitionDataset(Dataset):
             current_idx += n_steps
 
         return episode_to_indices
-
-    def __len__(self):
-        if self.preload:
-            return len(self.observations)
-        return len(self.index_map)
-
-    def __getitem__(self, idx):
-        if self.preload:
-            return {
-                'observations': self.observations[idx],
-                'actions': self.actions[idx],
-                'rewards': self.rewards[idx],
-                'next_observations': self.next_observations[idx],
-                'dones': self.dones[idx],
-                'episode_ids': self.episode_ids_tensor[idx],
-                'step_ids': self.step_ids_tensor[idx],
-            }
-        else:
-            # Lazy loading
-            ep_id, step_id = self.index_map[idx]
-            episode = self.minari_dataset[ep_id]
-            
-            obs = episode.observations[step_id]
-            next_obs = episode.observations[step_id + 1]
-            action = episode.actions[step_id]
-            reward = episode.rewards[step_id]
-            
-            termination = episode.terminations[step_id]
-            truncation = episode.truncations[step_id]
-            done = float(termination or truncation)
-            
-            return {
-                'observations': torch.tensor(obs, dtype=torch.float32),
-                'actions': torch.tensor(action, dtype=torch.float32),
-                'rewards': torch.tensor(reward, dtype=torch.float32),
-                'next_observations': torch.tensor(next_obs, dtype=torch.float32),
-                'dones': torch.tensor(done, dtype=torch.float32),
-                'episode_ids': torch.tensor(ep_id, dtype=torch.int64),
-                'step_ids': torch.tensor(step_id, dtype=torch.int64),
-            }
 
 
 class MultiEpisodeSequentialSampler(Sampler):
