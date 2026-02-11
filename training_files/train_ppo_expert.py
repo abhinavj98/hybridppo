@@ -163,8 +163,8 @@ if __name__ == "__main__":
             model.policy.load_state_dict(bc_policy.state_dict())
             model.expert_policy = deepcopy(model.policy)
             #Set expert policy log std as constant
-            model.policy.log_std.data.fill_(-0.45)
-            model.expert_policy.log_std.data.fill_(-0.6) #Keep slighly lower std for expert
+            model.policy.log_std.data.fill_(-.9)
+            model.expert_policy.log_std.data.fill_(-1) #Keep slighly lower std for expert
             print(f"Loaded BC policy weights from {args.bc_policy}")
             if model.reinit_critic:
                 model._reinit_critic_ortho()

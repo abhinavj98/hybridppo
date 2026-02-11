@@ -255,11 +255,12 @@ def run_hybrid_ppo_training(
         "--log_std_subtract", str(args.log_std_subtract),
         "--seed", str(args.seed),
         "--device", args.device_ppo,
-        '--reinit_critic' if args.reinit_critic else '',
     ]
     
     if args.run_name:
         cmd.extend(["--run_name", args.run_name])
+    if args.reinit_critic:
+        cmd.append("--reinit_critic")
     
     try:
         result = subprocess.run(cmd, check=True, cwd=Path(__file__).parent.parent)

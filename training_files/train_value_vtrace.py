@@ -151,13 +151,14 @@ if __name__ == "__main__":
 
     print(f"Starting V-trace value-only tuning for {target} transitions (batch_size={batch_size})")
     n_epochs = 100
+    model._reinit_critic_ortho()
     for epoch in range(n_epochs):
         # Fill the expert buffer using Minari transitions and V-trace GAE
         model.make_offline_rollouts(callback=None, expert_buffer=model.expert_buffer, n_rollout_steps=model.n_steps)
 
         # Iterate minibatches from the expert buffer
         for samples in model.expert_buffer.get(batch_size=batch_size):
-            obs, actions, values, log_probs, advantages, returns, log_probs_expert = samples
+            obs, actions, values, log_probs, advantages, returns, log_probs_expert, offline_val = samples
             # Convert observations and actions to tensors on device
             # Expert buffer already returns torch.Tensors; handle both cases.
             if isinstance(obs, th.Tensor):

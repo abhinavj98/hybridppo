@@ -64,7 +64,7 @@ class ExpertRolloutBuffer(RolloutBuffer):
         super().reset()
         self.log_prob_expert = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.offline_values = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
-
+        self.advantages_mc = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)  # For Monte-Carlo returns
     def add(
         self,
         obs: np.ndarray,
@@ -100,30 +100,40 @@ class ExpertRolloutBuffer(RolloutBuffer):
         """
 
         last_gae_lam = 0
+        last_mc_return = 0.0 # Initialize to 0 to stop infinite drift (The Anchor)
+        
         rho_bar = self.rho_bar  # For V-trace
         c_bar = self.c_bar      # For V-trace
+
         for step in reversed(range(self.buffer_size)):
             if step == self.buffer_size - 1:
                 next_non_terminal = 1.0 - dones.astype(np.float32)
                 next_values = last_values
             else:
                 next_non_terminal = 1.0 - self.episode_starts[step + 1]
-                next_values = self.offline_values[step + 1]
+                next_values = self.values[step + 1]
 
-            ratio = np.exp(self.log_probs[step] - self.log_prob_expert[step])  # ratio = p(a|s) / p(a|s, expert)
-            rho = np.clip(ratio, 0.5, rho_bar)
+            # --- 1. Standard GAE / V-Trace (For Policy/Online) ---
+            ratio = np.exp(self.log_probs[step] - self.log_prob_expert[step])
+            rho = np.clip(ratio, 1, rho_bar)
             c = np.clip(ratio, 0.5, c_bar)
 
-            # rho = c = 1.c
-            # self.gamma = 0.5
-            #Low lambda for stability. What it does is have shorter trace length. Is this true? Answer: Yes.
-            # Explanation: With low lambda, the weight on future advantages decreases rapidly, effectively shortening the trace length.
-            delta = (self.rewards[step]+ self.gamma * next_values * next_non_terminal - self.offline_values[step])* rho
-            # last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
-            #For retrace
-            last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam * c
-            self.advantages[step] = last_gae_lam 
-        self.returns = self.advantages + self.offline_values
+            delta = (self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step]) * rho
+            
+            last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
+            self.advantages[step] = last_gae_lam
+
+            # --- 2. Pure Monte Carlo (For Expert Value Target) ---
+            # R_t = r_t + gamma * R_{t+1}
+            # We ignore 'next_values' (network) and strictly sum the rewards.
+            last_mc_return = self.rewards[step] + self.gamma * last_mc_return * next_non_terminal
+            
+            # Advantage = Reality - Expectation
+            self.advantages_mc[step] = last_mc_return - self.values[step]
+
+        # Final Construction
+        # Returns = (R - V) + V = R (Pure Monte Carlo Return)
+        self.returns = self.advantages_mc + self.values
 
     def get(self, batch_size: Optional[int] = None) -> Generator[RolloutBufferSamples, None, None]:
         assert self.full, ""
@@ -398,7 +408,7 @@ class PPOExpert(OnPolicyAlgorithm):
             self.clip_range_vf = get_schedule_fn(self.clip_range_vf)
         
         # Store initial gae_lambda for scheduling (1.0 -> 0.95)
-        self._gae_lambda_initial = 1.0
+        self._gae_lambda_initial = 0.95
         self._gae_lambda_final = 0.95
         buffer_cls = DictRolloutBuffer if isinstance(self.observation_space, spaces.Dict) else RolloutBuffer
 
@@ -435,7 +445,7 @@ class PPOExpert(OnPolicyAlgorithm):
             )
             
             # Create separate optimizer for log_std with 10x lower learning rate
-            self.log_std_optimizer = th.optim.Adam([self.policy.log_std], lr=self.lr_schedule(1.0))
+            self.log_std_optimizer = th.optim.Adam([self.policy.log_std], lr=self.lr_schedule(1))
         else:
             self._initial_log_std = None
             self.log_std_optimizer = None
@@ -553,7 +563,7 @@ class PPOExpert(OnPolicyAlgorithm):
 
         with th.no_grad():
             # Compute value for the last timestep
-            values = self.policy.predict_values(next_obs.to(self.device)).squeeze(-1)  # pylint: disable=unexpected-keyword-arg
+            values = self.expert_policy.predict_values(next_obs.to(self.device)).squeeze(-1)  # pylint: disable=unexpected-keyword-arg
 
         # Update gae_lambda based on training progress (1.0 -> 0.95)
         current_gae_lambda = self._gae_lambda_final + (self._gae_lambda_initial - self._gae_lambda_final) * self._current_progress_remaining
@@ -702,7 +712,8 @@ class PPOExpert(OnPolicyAlgorithm):
      
 
                 # #Clamp advantages
-                # advantages = th.clamp(advantages, min=-10., max=10.)
+                
+                advantages = th.clamp(advantages, min=-10., max=10.)
                 if self.normalize_advantage:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -805,9 +816,10 @@ class PPOExpert(OnPolicyAlgorithm):
                 # allow = value_diff > 0
                 #Only allow to increas value when ratio is outside (1-phi, 1+phi)
                 # allow_down = (value_diff < 0) & (ratio_current_expert_offline > 1 + phi)
-
+                #Reduce value loss by 0.01 if negative
+                value_diff = th.where(value_diff < 0, value_diff * 0.1, value_diff)
                 value_loss_offline = th.mean(
-                    (value_diff ** 2) *allow*ratio_old_expert_offline * self.vf_coef)*0.1
+                    (value_diff ** 2) *th.clamp(ratio_old_expert_offline, 1+phi) * self.vf_coef)*0.01
                 
                 if entropy_online is None:
                     # Approximate entropy when no analytical form
@@ -821,7 +833,7 @@ class PPOExpert(OnPolicyAlgorithm):
                 else:
                     entropy_loss_offline = -th.mean(entropy_offline) * self.ent_coef
 
-                online_loss = policy_loss_online + entropy_loss_online + value_loss_online
+                online_loss = (policy_loss_online + entropy_loss_online + value_loss_online)
                 offline_loss = policy_loss_offline + entropy_loss_offline + value_loss_offline
 
                 # Calculate approximate form of reverse KL Divergence for early stopping
