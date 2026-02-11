@@ -592,14 +592,16 @@ class PPOExpert(OnPolicyAlgorithm):
                 act_tensor = actions.to(self.device)
 
                 # Q-learning Advantage Calculation
-                # Q(s, a_exp)
-                q_exp = self.policy.forward_q(obs_tensor, act_tensor).squeeze(-1)
+                # Q(s, a_exp), V(s), A(s, a_exp)
+                q_exp, v_exp, a_exp = self.policy.forward_q_v_a(obs_tensor, act_tensor)
+                q_exp = q_exp.squeeze(-1)
+                v_exp = v_exp.squeeze(-1)
 
-                # Q(s, a_pi) - Sample action from current policy
-                actions_pi, _, _ = self.policy.forward(obs_tensor)
-                q_pi = self.policy.forward_q(obs_tensor, actions_pi).squeeze(-1)
-
-                advantage = q_exp - q_pi
+                # Advantage = Q(s, a_exp) - V(s)
+                # Since Q = V + A, this is A(s, a_exp) (in the continuous case where A is uncentered).
+                # For discrete, Q = V + A - mean(A), so Q - V = A - mean(A).
+                # In both cases, this represents the advantage relative to the value function V.
+                advantage = q_exp - v_exp
 
                 # Q-learning Target Calculation
                 # r + gamma * (1-d) * Q_targ(s', a')

@@ -8,18 +8,80 @@ from gymnasium import spaces
 from stable_baselines3.common.utils import get_device
 from torch import nn
 
-class QNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim=1, hidden_dim=256):
-        super(QNetwork, self).__init__()
-        self.net = nn.Sequential(
+class DuelingQNetwork(nn.Module):
+    def __init__(self, input_dim, output_dim=1, hidden_dim=256, is_continuous=False, action_dim=0):
+        super(DuelingQNetwork, self).__init__()
+        self.is_continuous = is_continuous
+
+        # Shared trunk (features)
+        self.trunk = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
+            nn.ReLU()
+        )
+
+        # Value stream (V(s))
+        self.v_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim)
+            nn.Linear(hidden_dim, 1)
         )
-    def forward(self, x):
-        return self.net(x)
+
+        # Advantage stream (A(s, a))
+        if is_continuous:
+            # For continuous, advantage depends on features + action
+            # We assume input 'x' to forward contains features. Action is passed separately.
+            # But the caller usually passes concatenated features+action to forward().
+            # Let's adjust: MlpPolicy passes (features, action) concatenated.
+            # So input_dim includes action_dim.
+            # But V should NOT depend on action.
+            # So we need to slice the input?
+            # Better design: Pass features and action separately to forward.
+            # But MlpPolicy.forward_q currently concatenates.
+            # Let's change MlpPolicy to pass them separately or handle splitting here.
+            # Given MlpPolicy structure, let's assume input 'x' is features.
+            # And we need action separately?
+            # Re-design: DuelingQNetwork.forward(features, action=None)
+
+            # Input dim passed to init is 'features_dim'.
+            # A-stream takes features + action.
+            self.a_head = nn.Sequential(
+                nn.Linear(hidden_dim + action_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1)
+            )
+        else:
+            # Discrete: A(s, a) -> output_dim (n_actions)
+            # Input is just features.
+            self.a_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, output_dim)
+            )
+
+    def forward(self, features, action=None):
+        feat_emb = self.trunk(features)
+        v = self.v_head(feat_emb)
+
+        if self.is_continuous:
+            # Concatenate features embedding with action for Advantage
+            # Note: We use the embedding from trunk, but action is raw.
+            # Maybe concatenate raw features + action? Or embedding + action?
+            # Embedding + action is standard.
+            a_input = th.cat([feat_emb, action], dim=-1)
+            a = self.a_head(a_input)
+
+            # For continuous, Q = V + A.
+            # (We could center A, but without integration/sampling it's hard.
+            #  Let's stick to simple sum as requested 'Q - V' implies A is the residual).
+            q = v + a
+            return q, v, a
+        else:
+            # Discrete
+            a = self.a_head(feat_emb)
+            # Center A: Q(s,a) = V(s) + (A(s,a) - mean(A(s,.)))
+            a_mean = a.mean(dim=-1, keepdim=True)
+            q = v + (a - a_mean)
+            return q, v, a
 
 # class MultiInputPolicyExpert(MultiInputActorCriticPolicy):
 #     def __init__(self, *args, **kwargs):
@@ -54,29 +116,43 @@ class MlpPolicyExpert(ActorCriticPolicy):
     def __init__(self, *args, **kwargs):
         super(MlpPolicyExpert, self).__init__(*args, **kwargs)
 
-        # Initialize Q-Network
+        # Initialize Dueling Q-Network
         input_dim = self.features_dim
 
         if isinstance(self.action_space, spaces.Box):
-            input_dim += int(np.prod(self.action_space.shape))
-            self.q_net = QNetwork(input_dim, output_dim=1)
+            action_dim = int(np.prod(self.action_space.shape))
+            # Note: For continuous, QNetwork now takes (features, action) separately.
+            # But the 'input_dim' to DuelingQNetwork trunk is just features_dim.
+            self.q_net = DuelingQNetwork(input_dim, output_dim=1, is_continuous=True, action_dim=action_dim)
         elif isinstance(self.action_space, spaces.Discrete):
-            self.q_net = QNetwork(input_dim, output_dim=self.action_space.n)
+            # For discrete, input is features only.
+            self.q_net = DuelingQNetwork(input_dim, output_dim=self.action_space.n, is_continuous=False)
         else:
              # Fallback or error, for now assume compatible with simple Q-learning if possible
              pass
 
     def forward_q(self, obs, action):
+        """Returns only the Q-value (for backward compatibility / loss calculation)."""
+        q, _, _ = self.forward_q_v_a(obs, action)
+        return q
+
+    def forward_q_v_a(self, obs, action):
+        """Returns Q, V, and A."""
         features = self.extract_features(obs)
         if isinstance(self.action_space, spaces.Box):
             if len(action.shape) > 2:
                 action = action.reshape(action.shape[0], -1)
-            q_input = th.cat([features, action], dim=-1)
-            return self.q_net(q_input)
+            # Pass features and action separately
+            q, v, a = self.q_net(features, action)
+            return q, v, a
         elif isinstance(self.action_space, spaces.Discrete):
-             q_values = self.q_net(features)
-             # gather
-             return q_values.gather(1, action.long().view(-1, 1))
+             # Pass features only (action is implicit for all actions)
+             q_values, v, a_values = self.q_net(features)
+             # gather for the specific action
+             action_long = action.long().view(-1, 1)
+             q = q_values.gather(1, action_long)
+             a = a_values.gather(1, action_long)
+             return q, v, a
         else:
              raise NotImplementedError("Unsupported action space for Q-learning")
 
