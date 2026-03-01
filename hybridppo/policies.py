@@ -3,8 +3,12 @@
 from stable_baselines3.common.policies import ActorCriticCnnPolicy, ActorCriticPolicy, MultiInputActorCriticPolicy
 from typing import Dict, List, Tuple, Type, Union
 import torch as th
+import numpy as np
+from gymnasium import spaces
 from stable_baselines3.common.utils import get_device
 from torch import nn
+
+
 # class MultiInputPolicyExpert(MultiInputActorCriticPolicy):
 #     def __init__(self, *args, **kwargs):
 #         super(MultiInputPolicyExpert, self).__init__(*args, **kwargs)
@@ -37,6 +41,88 @@ import copy
 class MlpPolicyExpert(ActorCriticPolicy):
     def __init__(self, *args, **kwargs):
         super(MlpPolicyExpert, self).__init__(*args, **kwargs)
+
+        # Use the latent dimension from the shared extractor (specifically latent_vf)
+        # Note: ActorCriticPolicy stores self.mlp_extractor
+        latent_dim = self.mlp_extractor.latent_dim_vf
+
+        # Value Head for Q (V-stream)
+        self.q_val_net = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim, 1)
+        )
+
+        # Advantage Head for Q (A-stream)
+        if isinstance(self.action_space, spaces.Box):
+            action_dim = int(np.prod(self.action_space.shape))
+            self.q_adv_net = nn.Sequential(
+                nn.Linear(latent_dim + action_dim, latent_dim),
+                nn.ReLU(),
+                nn.Linear(latent_dim, 1)
+            )
+        elif isinstance(self.action_space, spaces.Discrete):
+            self.q_adv_net = nn.Sequential(
+                nn.Linear(latent_dim, latent_dim),
+                nn.ReLU(),
+                nn.Linear(latent_dim, self.action_space.n)
+            )
+        else:
+             raise NotImplementedError("Unsupported action space for Q-learning")
+
+        # Initialize weights orthogonally (matching SB3 style)
+        for module in [self.q_val_net, self.q_adv_net]:
+            for layer in module.modules():
+                if isinstance(layer, nn.Linear):
+                    nn.init.orthogonal_(layer.weight, gain=np.sqrt(2))
+                    if layer.bias is not None:
+                        nn.init.constant_(layer.bias, 0.0)
+
+    def forward_q(self, obs, action):
+        """Returns only the Q-value."""
+        q, _, _ = self.forward_q_v_a(obs, action)
+        return q
+
+    def forward_q_v_a(self, obs, action):
+        """Returns Q, V, and A using MLP Extractor features."""
+        # 1. Extract Features
+        features = self.extract_features(obs)
+
+        # 2. Get Latent Representations
+        if self.share_features_extractor:
+            latent_pi, latent_vf = self.mlp_extractor(features)
+        else:
+            pi_features, vf_features = features
+            latent_pi = self.mlp_extractor.forward_actor(pi_features)
+            latent_vf = self.mlp_extractor.forward_critic(vf_features)
+
+        # 3. Compute Value (V-stream)
+        v = self.q_val_net(latent_vf)
+
+        # 4. Compute Advantage (A-stream)
+        if isinstance(self.action_space, spaces.Box):
+            if len(action.shape) > 2:
+                action = action.reshape(action.shape[0], -1)
+            # Concatenate latent_vf with action for continuous advantage
+            a_input = th.cat([latent_vf, action], dim=-1)
+            a = self.q_adv_net(a_input)
+            q = v + a
+        else:
+            # Discrete
+            a_values = self.q_adv_net(latent_vf)
+            # Center A
+            a_mean = a_values.mean(dim=-1, keepdim=True)
+            a_centered = a_values - a_mean
+
+            # Gather specific action
+            action_long = action.long().view(-1, 1)
+            a = a_centered.gather(1, action_long)
+
+            # Q = V + (A - mean(A))
+            # Note: v is shape (B, 1), a is shape (B, 1)
+            q = v + a
+
+        return q, v, a
 
     class MlpExtractor(nn.Module):
         """

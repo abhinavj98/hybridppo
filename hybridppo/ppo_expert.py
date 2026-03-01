@@ -46,6 +46,10 @@ SelfPPO = TypeVar("SelfPPO", bound="PPO")
 class ExpertRolloutBufferSamples(NamedTuple):
     observations: th.Tensor
     actions: th.Tensor
+    expert_actions: th.Tensor     # New
+    next_observations: th.Tensor  # New
+    next_actions: th.Tensor       # New
+    dones: th.Tensor              # New
     old_values: th.Tensor
     old_log_prob: th.Tensor
     advantages: th.Tensor
@@ -65,17 +69,43 @@ class ExpertRolloutBuffer(RolloutBuffer):
         self.log_prob_expert = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.offline_values = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.advantages_mc = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)  # For Monte-Carlo returns
+
+        self.next_observations = np.zeros((self.buffer_size, self.n_envs, *self.obs_shape), dtype=np.float32)
+        self.dones = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        if isinstance(self.action_space, spaces.Discrete):
+             self.next_actions = np.zeros((self.buffer_size, self.n_envs, 1), dtype=np.float32)
+             self.expert_actions = np.zeros((self.buffer_size, self.n_envs, 1), dtype=np.float32)
+        else:
+             self.next_actions = np.zeros((self.buffer_size, self.n_envs, self.action_dim), dtype=np.float32)
+             self.expert_actions = np.zeros((self.buffer_size, self.n_envs, self.action_dim), dtype=np.float32)
+
     def add(
         self,
         obs: np.ndarray,
         action: np.ndarray,
+        expert_action: np.ndarray, # New
+        next_obs: np.ndarray, # New
+        next_action: np.ndarray, # New
         reward: np.ndarray,
         episode_start: np.ndarray,
         value: th.Tensor,
         log_prob: th.Tensor,
         log_prob_expert: np.ndarray,
         offline_values: np.ndarray = None,
+        advantage: Optional[np.ndarray] = None, # New
+        return_val: Optional[np.ndarray] = None, # New
+        done: Optional[np.ndarray] = None, # New
     ) -> None:
+        self.next_observations[self.pos] = np.array(next_obs).copy()
+        self.next_actions[self.pos] = np.array(next_action).copy()
+        self.expert_actions[self.pos] = np.array(expert_action).copy()
+        if done is not None:
+             self.dones[self.pos] = np.array(done).copy()
+        if advantage is not None:
+             self.advantages[self.pos] = advantage.copy()
+        if return_val is not None:
+             self.returns[self.pos] = return_val.copy()
+
         super().add(obs, action, reward, episode_start, value, log_prob)
         self.log_prob_expert[self.pos-1] = log_prob_expert.clone().cpu().numpy()
         self.offline_values[self.pos-1] = offline_values.clone().cpu().numpy() 
@@ -143,6 +173,10 @@ class ExpertRolloutBuffer(RolloutBuffer):
             _tensor_names = [
                 "observations",
                 "actions",
+                "expert_actions",
+                "next_observations",
+                "next_actions",
+                "dones",
                 "values",
                 "log_probs",
                 "advantages",
@@ -172,6 +206,10 @@ class ExpertRolloutBuffer(RolloutBuffer):
         data = (
             self.observations[batch_inds],
             self.actions[batch_inds],
+            self.expert_actions[batch_inds],
+            self.next_observations[batch_inds],
+            self.next_actions[batch_inds],
+            self.dones[batch_inds].flatten(),
             self.values[batch_inds].flatten(),
             self.log_probs[batch_inds].flatten(),
             self.advantages[batch_inds].flatten(),
@@ -475,6 +513,20 @@ class PPOExpert(OnPolicyAlgorithm):
                     th.nn.init.orthogonal_(module.weight, gain=output_gain)
                     if module.bias is not None:
                         th.nn.init.constant_(module.bias, 0.0)
+
+        if hasattr(self.policy, "q_val_net"):
+            for module in self.policy.q_val_net.modules():
+                if isinstance(module, th.nn.Linear):
+                    th.nn.init.orthogonal_(module.weight, gain=output_gain)
+                    if module.bias is not None:
+                        th.nn.init.constant_(module.bias, 0.0)
+        if hasattr(self.policy, "q_adv_net"):
+            for module in self.policy.q_adv_net.modules():
+                if isinstance(module, th.nn.Linear):
+                    th.nn.init.orthogonal_(module.weight, gain=output_gain)
+                    if module.bias is not None:
+                        th.nn.init.constant_(module.bias, 0.0)
+
         if hasattr(self.expert_policy, "mlp_extractor") and hasattr(self.expert_policy.mlp_extractor, "value_net"):
             for module in self.expert_policy.mlp_extractor.value_net.modules():
                 if isinstance(module, th.nn.Linear):
@@ -484,6 +536,19 @@ class PPOExpert(OnPolicyAlgorithm):
 
         if hasattr(self.expert_policy, "value_net"):
             for module in self.expert_policy.value_net.modules():
+                if isinstance(module, th.nn.Linear):
+                    th.nn.init.orthogonal_(module.weight, gain=output_gain)
+                    if module.bias is not None:
+                        th.nn.init.constant_(module.bias, 0.0)
+
+        if hasattr(self.expert_policy, "q_val_net"):
+            for module in self.expert_policy.q_val_net.modules():
+                if isinstance(module, th.nn.Linear):
+                    th.nn.init.orthogonal_(module.weight, gain=output_gain)
+                    if module.bias is not None:
+                        th.nn.init.constant_(module.bias, 0.0)
+        if hasattr(self.expert_policy, "q_adv_net"):
+            for module in self.expert_policy.q_adv_net.modules():
                 if isinstance(module, th.nn.Linear):
                     th.nn.init.orthogonal_(module.weight, gain=output_gain)
                     if module.bias is not None:
@@ -531,6 +596,7 @@ class PPOExpert(OnPolicyAlgorithm):
             dones = batch['dones'][i]
             actions = batch['actions'][i]
             next_obs = batch['next_observations'][i]
+            next_actions = batch['next_actions'][i]
 
             # Ensure 1D shapes for per-env scalars to avoid broadcast issues
             rewards_np = rewards.squeeze(-1).cpu().numpy()
@@ -542,37 +608,80 @@ class PPOExpert(OnPolicyAlgorithm):
 
             with th.no_grad():
                 obs_tensor = last_obs.to(self.device)
-                act_tensor = actions.to(self.device)
-                _, values, log_probs = self.policy.forward_expert(obs_tensor, act_tensor)
-                _, values_frozen, expert_log_probs = self.expert_policy.forward_expert(obs_tensor, act_tensor)
+                # act_tensor here is expert action from dataset
+                expert_act_tensor = actions.to(self.device)
+
+                # 1. Sample action from current policy for advantage calculation
+                # (We want to update policy to maximize its own advantage Q(s, pi) - V(s))
+                # Note: forward_expert does not return action distribution, but forward does.
+                # Use standard PPO style sampling:
+                dist = self.policy.get_distribution(obs_tensor)
+                actions_pi = dist.get_actions(deterministic=False)
+                log_prob_pi = dist.log_prob(actions_pi)
+
+                # 2. Compute Advantage = Q(s, pi) - V(s)
+                q_pi, v_pi, _ = self.policy.forward_q_v_a(obs_tensor, actions_pi)
+                q_pi = q_pi.squeeze(-1)
+                v_pi = v_pi.squeeze(-1)
+                advantage = q_pi - v_pi
+
+                # 3. Q-learning Target Calculation using EXPERT action (next step)
+                # r + gamma * (1-d) * Q_targ(s', a'_exp)
+                next_obs_tensor = next_obs.to(self.device)
+                next_act_tensor = next_actions.to(self.device)
+
+                with th.no_grad():
+                    next_q = self.expert_policy.forward_q(next_obs_tensor, next_act_tensor).squeeze(-1)
+                    target_q = rewards.to(self.device).squeeze(-1) + self.gamma * (1 - dones.to(self.device).squeeze(-1)) * next_q
+
+                # Get value estimate for buffer (using pi action state value v_pi is fine, or recompute)
+                # PPO uses 'values' for advantage standardization and logging.
+                # In standard PPO, values is V(s). We have v_pi.
+                values = v_pi
+
+                # We need expert log prob for... nothing critical in this new mode, but maybe logging.
+                # And we need to store log_prob_pi as 'log_prob' so PPO update is correct.
+                # What about 'expert_log_probs'? Original code used it for importance sampling.
+                # Here we are on-policy with respect to the generated action pi (IS ratio ~ 1).
+                # So we can just put something dummy or recompute.
+                # Let's keep the structure but note that 'log_probs' passed to buffer must be log_prob_pi.
+
+                # We do need values_frozen? Maybe for logging.
+                _, values_frozen, expert_log_probs = self.expert_policy.forward_expert(obs_tensor, expert_act_tensor)
 
 
             
             expert_buffer.add(
                 last_obs.cpu().numpy(),
-                act_tensor.cpu().numpy(),
+                actions_pi.cpu().numpy(),          # action = pi action
+                expert_act_tensor.cpu().numpy(),   # expert_action = dataset action
+                next_obs.cpu().numpy(),
+                next_actions.cpu().numpy(),
                 rewards_np,
                 self._expert_last_episode_starts,
                 values.squeeze(-1),
-                log_probs,
-                expert_log_probs,
-                values_frozen.squeeze(-1)  # offline_values
+                log_prob_pi,                       # log_prob = pi log prob
+                expert_log_probs,                  # log_prob_expert (unused for update but stored)
+                values_frozen.squeeze(-1),         # offline_values
+                advantage=advantage.cpu().numpy(),
+                return_val=target_q.cpu().numpy(), # Target Q for expert action
+                done=dones_np
             )
            
             self._expert_last_episode_starts = dones_np
 
-        with th.no_grad():
-            # Compute value for the last timestep
-            values = self.expert_policy.predict_values(next_obs.to(self.device)).squeeze(-1)  # pylint: disable=unexpected-keyword-arg
+        # with th.no_grad():
+        #     # Compute value for the last timestep
+        #     values = self.expert_policy.predict_values(next_obs.to(self.device)).squeeze(-1)  # pylint: disable=unexpected-keyword-arg
 
         # Update gae_lambda based on training progress (1.0 -> 0.95)
-        current_gae_lambda = self._gae_lambda_final + (self._gae_lambda_initial - self._gae_lambda_final) * self._current_progress_remaining
-        expert_buffer.gae_lambda = current_gae_lambda
+        # current_gae_lambda = self._gae_lambda_final + (self._gae_lambda_initial - self._gae_lambda_final) * self._current_progress_remaining
+        # expert_buffer.gae_lambda = current_gae_lambda
         
-        expert_buffer.compute_returns_and_advantage(
-            last_values=values.cpu().numpy(),
-            dones=dones_np,
-        )
+        # expert_buffer.compute_returns_and_advantage(
+        #     last_values=values.cpu().numpy(),
+        #     dones=dones_np,
+        # )
         if self.verbose > 0:
             print("INFO: Finished making offline rollouts")
         # callback.on_rollout_end()
@@ -821,6 +930,14 @@ class PPOExpert(OnPolicyAlgorithm):
                 value_loss_offline = th.mean(
                     (value_diff ** 2) *th.clamp(ratio_old_expert_offline, 1+phi) * self.vf_coef)*0.01
                 
+                # Q-learning Loss using EXPERT actions
+                # batch.actions is now pi actions. batch.expert_actions is expert actions.
+                current_q = self.policy.forward_q(offline_batch.observations, offline_batch.expert_actions).squeeze(-1)
+                target_q = offline_batch.returns
+                q_loss = F.mse_loss(current_q, target_q)
+
+                value_loss_offline += q_loss
+
                 if entropy_online is None:
                     # Approximate entropy when no analytical form
                     entropy_loss_online = -th.mean(-log_prob_online + 1e-8) * self.ent_coef
@@ -1240,6 +1357,10 @@ class PPOExpert(OnPolicyAlgorithm):
             if iteration % 5 == 0:
                 #Copy expert policy critic to current policy critic
                 self.expert_policy.value_net.load_state_dict(self.policy.value_net.state_dict())
+                if hasattr(self.policy, "q_val_net") and hasattr(self.expert_policy, "q_val_net"):
+                    self.expert_policy.q_val_net.load_state_dict(self.policy.q_val_net.state_dict())
+                if hasattr(self.policy, "q_adv_net") and hasattr(self.expert_policy, "q_adv_net"):
+                    self.expert_policy.q_adv_net.load_state_dict(self.policy.q_adv_net.state_dict())
                 # self.policy.value_net.load_state_dict(self.expert_policy.value_net.state_dict())
             iteration += 1
            
